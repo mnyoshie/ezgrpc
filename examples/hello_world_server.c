@@ -1,6 +1,7 @@
 #include "ezgrpc.h"
 
 int whatever_service1(void *req, void *res, void *userdata){
+  sleep(2);
   printf("called service1\n");
   return 0;
 }
@@ -17,7 +18,9 @@ int main(){
   ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1);
   ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2);
 
+  ezgrpc_server_set_listen_port(server_handle, 19009);
   ezgrpc_server_start(server_handle);
+  ezgrpc_server_free(server_handle);
 
   return 0;
 }

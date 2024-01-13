@@ -14,6 +14,9 @@
  */
 #include "ezgrpc.h"
 
+/* value of pthread_self() */
+static pthread_t g_thread_self;
+
 static char *ezgrpc_status2str(ezgrpc_status_code_t status){
   switch (status) {
   case EZGRPC_GRPC_STATUS_OK:
@@ -120,6 +123,27 @@ static ezgrpc_stream_t *ezget_stream(ezgrpc_stream_t *stream, uint32_t id) {
   return NULL;
 }
 
+static void *session_reaper(void *userdata) {
+  ezgrpc_session_t *ezsession = userdata;
+  size_t volatile* nb_sessions = ezsession->nb_sessions;
+
+  printf("reaping session...\n");
+  /* wait for other streams to close */
+  while (ezsession->nb_open_streams) {
+    //printf("open %d\n", ezsession->nb_open_streams);
+  }
+  bufferevent_setcb(ezsession->bev, NULL, NULL, NULL, NULL);
+  bufferevent_free(ezsession->bev);
+  nghttp2_session_del(ezsession->ngsession);
+
+  printf("session got reaped\n");
+
+  fflush(stdout);
+  memset(ezsession, 0, sizeof(ezgrpc_session_t));
+  (*nb_sessions)--;
+  return NULL;
+}
+
 /* creates a ezstream and adds it to the linked list */
 static ezgrpc_stream_t *ezcreate_stream(ezgrpc_stream_t *stream) {
   ezgrpc_stream_t *ezstream = calloc(1, sizeof(ezgrpc_stream_t));
@@ -135,8 +159,9 @@ static ezgrpc_stream_t *ezcreate_stream(ezgrpc_stream_t *stream) {
 static void ezfree_stream(ezgrpc_stream_t *stream) {
   free(stream->service_path);
   free(stream->recv_data);
-  free(stream->cbdata);
+  free(stream->send_data);
   free(stream);
+  printf("freed stream\n");
 }
 
 static int ezremove_stream(ezgrpc_stream_t **stream, uint32_t id) {
@@ -159,12 +184,10 @@ static ssize_t data_source_read_callback(nghttp2_session *session,
                                          nghttp2_data_source *source,
                                          void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
-  /* NOTE: ` (ezcallback_t*)source->ptr)->ezstream` is an abused of notation
-   * but is convenient.
-   *
-   * the data source is actuallt in ezstream->send_data.
+  /*
+   * the data source is actually in ezstream->send_data.
    */
-  ezgrpc_stream_t *ezstream = ((ezcallback_t*)source->ptr)->ezstream;
+  ezgrpc_stream_t *ezstream = source->ptr;
 
   if (ezstream->grpc_status == EZGRPC_GRPC_STATUS_OK) {
   nghttp2_nv trailers[] = {
@@ -195,21 +218,23 @@ static ssize_t data_source_read_callback(nghttp2_session *session,
 }
 
 static void *ezgrpc_send_response(void *userdata) {
-  ezcallback_t *cbdata = userdata;
-  ezgrpc_session_t *ezsession = cbdata->ezsession;
-  ezgrpc_stream_t *ezstream = cbdata->ezstream;
+//  ezcallback_t *cbdata = userdata;
+  ezgrpc_stream_t *ezstream = userdata;
+  ezgrpc_session_t *ezsession = ezstream->ezsession;
 
   nghttp2_nv nva[] = {
       {(void *)":status", (void *)"200", 7, 3},
       {(void *)"content-type", (void *)"application/grpc", 12, 16},
   };
-  nghttp2_data_provider data_provider = {{.ptr = cbdata},
+  nghttp2_data_provider data_provider = {{.ptr = ezstream},
                                            data_source_read_callback};
 
 
   if (ezstream->grpc_status == EZGRPC_GRPC_STATUS_OK) {
     /* CALL THE ACTUAL SERVICE!! */
-    int res = cbdata->svcall(NULL, NULL, NULL);
+    int res = ezstream->svcall(NULL, NULL, NULL);
+    if (res)
+      ezstream->grpc_status = EZGRPC_GRPC_STATUS_INTERNAL;
   }
   
   pthread_mutex_lock(&ezsession->ngmutex);
@@ -252,7 +277,7 @@ static ssize_t ngsend_callback(nghttp2_session *session, const uint8_t *data,
 
   printf("NGSEND SEND <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< %zu bytes\n",
          length);
-  ezgrpc_dump(data, length);
+  ezgrpc_dump((void*)data, length);
   printf("NGSEND SEND >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
   return length;
 }
@@ -287,8 +312,16 @@ static int on_begin_headers_callback(nghttp2_session *session,
   if (st == NULL)
     return NGHTTP2_ERR_CALLBACK_FAILURE;
 
+  st->time = (uint64_t)time(NULL);
+  st->stream_id = frame->hd.stream_id;
+  st->ezsession = ezsession;
+  st->is_shutdown = &ezsession->is_shutdown;
+
+  /* g_thread_self is kind of the NULL for thread */
+  st->sthread = g_thread_self;
+
   ezsession->st = st;
-  ezsession->st->stream_id = frame->hd.stream_id;
+  ezsession->nb_open_streams++;
 
   return 0;
 }
@@ -329,7 +362,7 @@ static int on_header_callback(nghttp2_session *session,
   }
   /* clang-format on */
 
-  printf("header type: %d, %s: %.*s\n", frame->hd.type, name, valuelen, value);
+  printf("header type: %d, %s: %.*s\n", frame->hd.type, name, (int)valuelen, value);
 
   return 0;
 }
@@ -345,17 +378,38 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
     if (frame->hd.stream_id != 0)
       return 0;
 
-    printf("ack %d, length %d\n", frame->settings.hd.flags,
+    printf("ack %d, length %zu\n", frame->settings.hd.flags,
            frame->settings.hd.length);
     if (!(frame->settings.hd.flags & NGHTTP2_FLAG_ACK)) {
-      ;
-      ; // TODO: apply settings
+      // TODO: apply settings
+      for (size_t i = 0; i < frame->settings.niv; i++){
+        switch (frame->settings.iv[i].settings_id){
+          case NGHTTP2_SETTINGS_HEADER_TABLE_SIZE:
+            ezsession->csettings.header_table_size =  frame->settings.iv[i].value;
+   	 break;
+          case NGHTTP2_SETTINGS_ENABLE_PUSH:
+            ezsession->csettings.enable_push =  frame->settings.iv[i].value;
+   	 break;
+          case NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS:
+            ezsession->csettings.max_concurrent_streams =  frame->settings.iv[i].value;
+   	 break;
+         // case NGHTTP2_SETTINGS_FLOW_CONTROL:
+           // ezstream->flow_control =  frame->settings.iv[i].value;
+   	 break;
+          default: break;
+        } ;
+      }
     } else if (frame->settings.hd.flags & NGHTTP2_FLAG_ACK &&
                frame->settings.hd.length == 0) {
-      /* OK. The client acknowledge our settings */
+      /* OK. The client acknowledge our settings. do nothing */
     } else
       assert(0); // TODO
     break;
+  case NGHTTP2_HEADERS:
+    if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM){
+      nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE, frame->hd.stream_id, 1);
+    }
+    return 0;
   case NGHTTP2_DATA: {
     if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM))
       return 0;
@@ -368,9 +422,14 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
       assert(0); // TODO
 
     if (!(ezstream->is_method_post && ezstream->is_scheme_http &&
-          ezstream->is_te_trailers && ezstream->is_content_grpc &&
-          (ezstream->recv_data_len >= 5)))
-      ezstream->grpc_status = EZGRPC_GRPC_STATUS_UNIMPLEMENTED;
+          ezstream->is_te_trailers && ezstream->is_content_grpc)) {
+      nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE, frame->hd.stream_id, 1);
+      return 0;
+    }
+    if ((ezstream->recv_data_len <= 4))
+      ezstream->grpc_status = EZGRPC_GRPC_STATUS_INVALID_ARGUMENT;
+
+    printf("recv data len %zu\n", ezstream->recv_data_len);
 
     ezgrpc_services_t *sv = ezsession->sv;
     /* look up service path */
@@ -387,17 +446,11 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
 
     if (svcall == NULL)
       ezstream->grpc_status = EZGRPC_GRPC_STATUS_UNIMPLEMENTED; 
-    ezcallback_t *cbdata = calloc(1, sizeof(ezcallback_t));
-    if (cbdata == NULL)
-      assert(0); // TODO
 
     /* set up the parameters */
-    cbdata->svcall = svcall;
-    cbdata->ezsession = ezsession;
-    cbdata->ezstream = ezstream;
-    ezstream->cbdata = cbdata;
+    ezstream->svcall = svcall;
 
-    int res = pthread_create(&cbdata->ezthread, NULL, ezgrpc_send_response, cbdata);
+    int res = pthread_create(&ezstream->sthread, NULL, ezgrpc_send_response, ezstream);
     if (res)
       assert(0); // TODO
 //    ezhandle_service(cbdata);
@@ -433,8 +486,10 @@ static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
 
 int on_stream_close_callback(nghttp2_session *session, int32_t stream_id, uint32_t error_code, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
-
   ezremove_stream(&ezsession->st, stream_id);
+
+  ezsession->nb_open_streams--;
+
   return 0;
 }
 
@@ -444,17 +499,19 @@ static void conn_readcb(struct bufferevent *bev, void *user_data) {
   /* reading is ready! */
   ezgrpc_session_t *ezsession = user_data;
 
+  if (ezsession->is_shutdown)
+    return;
   /* check if nghttp2 actually wants to read */
+    pthread_mutex_lock(&ezsession->ngmutex);
   if (nghttp2_session_want_read(ezsession->ngsession)) {
     printf("read called\n");
-    pthread_mutex_lock(&ezsession->ngmutex);
     int res = nghttp2_session_recv(ezsession->ngsession);
     res = nghttp2_session_send(ezsession->ngsession);
-    pthread_mutex_unlock(&ezsession->ngmutex);
     printf("read exited\n");
     if (res)
       assert(0); // TODO
   }
+    pthread_mutex_unlock(&ezsession->ngmutex);
 }
 
 static void conn_writecb(struct bufferevent *bev, void *user_data) {
@@ -462,45 +519,69 @@ static void conn_writecb(struct bufferevent *bev, void *user_data) {
   printf("ready write!\n");
   ezgrpc_session_t *ezsession = user_data;
 
+  if (ezsession->is_shutdown)
+    return;
   /* check if nghttp2 actually wants to write */
+  pthread_mutex_lock(&ezsession->ngmutex);
   if (nghttp2_session_want_write(ezsession->ngsession)) {
     printf("write called\n");
-    pthread_mutex_lock(&ezsession->ngmutex);
     int res = nghttp2_session_send(ezsession->ngsession);
-    pthread_mutex_unlock(&ezsession->ngmutex);
     printf("write exited\n");
     if (res)
       assert(0); // TODO
   }
+  pthread_mutex_unlock(&ezsession->ngmutex);
   printf("ready write exited\n");
 }
 
 static void conn_eventcb(struct bufferevent *bev, short events,
                          void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
-  if (events & BEV_EVENT_EOF) {
-    printf("Connection closed.\n");
-
-  } else if (events & BEV_EVENT_ERROR) {
-    printf("Got an error on the connection: %s\n", strerror(errno));
-  } else
+  if (ezsession->is_shutdown)
     return;
-
-  // TODO clean up session
-  bufferevent_free(bev);
-  ezgrpc_stream_t *snext = NULL;
-  for (ezgrpc_stream_t *s = ezsession->st; s != NULL; s = snext) {
-    snext = s->next;
-    printf("deleted %d method_post %d, scheme_http %d, content_grpc %d\n",
-           s->stream_id, s->is_method_post, s->is_scheme_http,
-           s->is_content_grpc);
-    ezfree_stream(s);
+  if (events & BEV_EVENT_CONNECTED) {
+    printf("connected\n");
+    return ;
   }
 
-  nghttp2_session_del(ezsession->ngsession);
-  (*(ezsession->nb_sessions))--;
-  ezsession->is_used = 0;
-  memset(ezsession, 0, sizeof(ezgrpc_session_t));
+  if (events & BEV_EVENT_EOF) {
+    printf("Connection closed.\n");
+  }
+  if (events & BEV_EVENT_ERROR) {
+    printf("Got an error on the connection: %s\n", strerror(errno));
+  }
+  ezsession->is_shutdown = 1;
+  //pthread_mutex_lock(&ezsession->ngmutex);
+  
+
+  // TODO clean up running streams
+//  ezgrpc_stream_t *snext = NULL;
+//  for (ezgrpc_stream_t *s = ezsession->st; s != NULL; s = snext) {
+//    snext = s->next;
+//    if (!(pthread_equal(g_thread_self, s->sthread))) {
+//      /* cancel stream thread */
+//      pthread_kill(s->sthread, 0);
+//      printf("thread killed\n");
+//    }
+//    printf("deleted %d method_post %d, scheme_http %d, content_grpc %d\n",
+//           s->stream_id, s->is_method_post, s->is_scheme_http,
+//           s->is_content_grpc);
+//    ezfree_stream(s);
+//  }
+
+  /* some callbacks may be running when the connection closed. wait for other
+   * callbacks to finish and then clean up
+   */
+  pthread_t thread_reaper;
+  int res = pthread_create(&thread_reaper, NULL, session_reaper, ezsession);
+  assert(!res);
+//  bufferevent_free(bev);
+//
+//  nghttp2_session_del(ezsession->ngsession);
+//  (*(ezsession->nb_sessions))--;
+//  ezsession->is_used = 0;
+//  memset(ezsession, 0, sizeof(ezgrpc_session_t));
+  //pthread_mutex_unlock(&ezsession->ngmutex);
 }
 
 static void ezgrpc_server_accept(struct evconnlistener *listener,
@@ -508,8 +589,10 @@ static void ezgrpc_server_accept(struct evconnlistener *listener,
                                  struct sockaddr *address, int socklen,
                                  void *userdata) {
   EZGRPCServer *server_handle = userdata;
-  if (server_handle->ng.nb_sessions >= EZGRPC_MAX_SESSIONS)
+  if (server_handle->ng.nb_sessions >= EZGRPC_MAX_SESSIONS) {
+    close(sockfd);
     return;
+  }
 
   ezgrpc_session_t *ezsession = NULL;
   for (int i = 0; i < EZGRPC_MAX_SESSIONS; i++) {
@@ -536,7 +619,8 @@ static void ezgrpc_server_accept(struct evconnlistener *listener,
     assert(0);
   }
 
-  bufferevent_enable(bev, EV_WRITE | EV_READ | EV_PERSIST);
+  bufferevent_enable(bev, EV_WRITE | EV_PERSIST);
+  bufferevent_enable(bev, EV_READ);
   ezsession->bev = bev;
 
   /* PREPARE NGHTTP2 */
@@ -573,9 +657,14 @@ static void ezgrpc_server_accept(struct evconnlistener *listener,
     assert(0); // TODO
   bufferevent_setcb(bev, conn_readcb, conn_writecb, conn_eventcb, ezsession);
 
+  res = setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char*)&(int){1}, sizeof(int));
+  if (res < 0)
+    assert(0); // TODO
+
   /*  all seems to be successful. set the following */
   ezsession->is_used = 1;
   server_handle->ng.nb_sessions++;
+  printf("session bev %p created\n", ezsession->bev);
 }
 
 
@@ -605,6 +694,8 @@ EZGRPCServer *ezgrpc_server_init() {
   if (server_handle == NULL)
     return NULL;
 
+  g_thread_self = pthread_self();
+
   server_handle->port = 8080;
 
   server_handle->sv.nb_services = 0;
@@ -628,6 +719,7 @@ int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port) {
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
                               ezgrpc_server_service_callback service_callback) {
+  signal(SIGPIPE, SIG_IGN);
   size_t nb_services = server_handle->sv.nb_services;
   ezgrpc_service_t *services = server_handle->sv.services;
 
