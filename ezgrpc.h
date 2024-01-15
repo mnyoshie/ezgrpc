@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <byteswap.h>
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,16 +25,9 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <event2/buffer.h>
-#include <event2/bufferevent.h>
-#include <event2/event.h>
-#include <event2/listener.h>
-#include <event2/util.h>
-
 #include <nghttp2/nghttp2.h>
 
 #define EZGRPC_MAX_SESSIONS 3
-
 
 enum ezgrpc_status_code_t {
   /* https://github.com/grpc/grpc/tree/master/include/grpcpp/impl/codegen */
@@ -54,7 +49,7 @@ enum ezgrpc_status_code_t {
   EZGRPC_GRPC_STATUS_DATA_LOSS = 15,
   EZGRPC_GRPC_STATUS_NULL = -1
 };
-typedef enum ezgrpc_status_code_t ezgrpc_status_code_t; 
+typedef enum ezgrpc_status_code_t ezgrpc_status_code_t;
 
 typedef struct ezgrpc_service_t ezgrpc_service_t;
 typedef struct ezgrpc_services_t ezgrpc_services_t;
@@ -64,6 +59,12 @@ typedef struct ezgrpc_sessions_t ezgrpc_sessions_t;
 
 typedef int (*ezgrpc_server_service_callback)(void *req, void *res,
                                               void *userdata);
+
+typedef struct ezvec_t ezvec_t;
+struct ezvec_t {
+  size_t data_len;
+  uint8_t *data;
+};
 
 /* stores the values of a SETTINGS frame */
 typedef struct ezgrpc_settingsf_t ezgrpc_settingsf_t;
@@ -106,10 +107,11 @@ struct ezgrpc_stream_t {
   pthread_t sthread;
 
   /* a pointer to ezsession.is_shutdown */
-  int volatile* is_shutdown;
+  int volatile *is_shutdown;
 
   /* is_cancel is set to 1 to notify the stream
    * has been cancelled by the client.
+   * this actually does nothing. cancelling is discouraged!!
    */
   volatile int is_cancel;
 
@@ -122,7 +124,7 @@ struct ezgrpc_stream_t {
 
   /* to be filled and send when the recv_data is processed and
    * the service is executed in another thread. this may also
-   * be filled when all `is_*` is invalid */
+   * be filled when all `is_*` is invalid/valid */
   ezgrpc_status_code_t grpc_status;
 
   ezgrpc_stream_t *next;
@@ -139,8 +141,14 @@ struct ezgrpc_services_t {
 };
 
 struct ezgrpc_session_t {
-  pthread_mutex_t ngmutex;
+  int sockfd;
+
   nghttp2_session *ngsession;
+
+  char *ip_addr;
+
+  pthread_mutex_t ngmutex;
+  pthread_t sthread;
 
   /* is_shutdown is set to 1 to notify the socket
    * has been closed and we need to shutdown the session
@@ -165,14 +173,13 @@ struct ezgrpc_session_t {
    * EZGRPCServer.ng.nb_sessions. this is to decrement the number of session
    * when this session is closed;
    */
-  size_t volatile* nb_sessions;
+  size_t volatile *nb_sessions;
 
   volatile size_t nb_open_streams;
+  volatile _Atomic size_t nb_running_callbacks;
   /* the streams in a linked lists. allocated when we are
    * about to receive a HEADERS frame */
   ezgrpc_stream_t *st;
-
-  struct bufferevent *bev;
 
   int is_used;
 };
@@ -186,6 +193,9 @@ typedef struct EZGRPCServer EZGRPCServer;
 struct EZGRPCServer {
   uint16_t port;
 
+  /* listening socket */
+  int sockfd;
+
   /* default server settings to be sent */
   ezgrpc_settingsf_t settings;
 
@@ -194,12 +204,6 @@ struct EZGRPCServer {
 
   /* running sessions */
   ezgrpc_sessions_t ng;
-
-//  struct {
-//    /* number of running sessions */
-//    size_t nb_sessions;
-//    ezgrpc_session_t sessions[EZGRPC_MAX_SESSIONS];
-//  } ng;
 };
 
 EZGRPCServer *ezgrpc_server_init(void);
