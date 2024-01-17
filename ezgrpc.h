@@ -57,13 +57,20 @@ typedef struct ezgrpc_services_t ezgrpc_services_t;
 typedef struct ezgrpc_session_t ezgrpc_session_t;
 typedef struct ezgrpc_sessions_t ezgrpc_sessions_t;
 
-typedef int (*ezgrpc_server_service_callback)(void *req, void *res,
+typedef struct ezvec_t ezvec_t;
+
+typedef int (*ezgrpc_server_service_callback)(ezvec_t req, ezvec_t *res,
                                               void *userdata);
 
-typedef struct ezvec_t ezvec_t;
 struct ezvec_t {
   size_t data_len;
   uint8_t *data;
+};
+
+typedef struct ezhandler_arg ezhandler_arg;
+struct ezhandler_arg {
+  sigset_t *signal_mask;
+  int shutdownfd;
 };
 
 /* stores the values of a SETTINGS frame */
@@ -81,7 +88,7 @@ typedef struct ezgrpc_stream_t ezgrpc_stream_t;
 struct ezgrpc_stream_t {
   uint32_t stream_id;
 
-  /* the time the stream is created by the server in
+  /* the time the stream is received by the server in
    * unix epoch */
   uint64_t time;
 
@@ -95,7 +102,7 @@ struct ezgrpc_stream_t {
   /* just a bool. if content type is application/grpc */
   char is_content_grpc;
 
-  /* stores `:path:` */
+  /* stores `:path` */
   char *service_path;
 
   /* a function pointer to the service. to be initialized when
@@ -155,6 +162,9 @@ struct ezgrpc_session_t {
    */
   volatile int is_shutdown;
 
+  /* a copy of EZGRPCServer.shutdownfd */
+  int shutdownfd;
+
   /* settings requested by the client. to be set when a SETTINGS
    * frame is received.
    */
@@ -173,7 +183,7 @@ struct ezgrpc_session_t {
    * EZGRPCServer.ng.nb_sessions. this is to decrement the number of session
    * when this session is closed;
    */
-  size_t volatile *nb_sessions;
+  size_t volatile *volatile nb_sessions;
 
   volatile size_t nb_open_streams;
   volatile _Atomic size_t nb_running_callbacks;
@@ -196,8 +206,19 @@ struct EZGRPCServer {
   /* listening socket */
   int sockfd;
 
+  /* we write to this when we shutdown our server.
+   * 0 is for reading.
+   * 1 is for writing. */
+
+  /* we pollin this descriptor.
+   * if there is movement, shutdown the server
+   */
+  int shutdownfd;
+
   /* default server settings to be sent */
   ezgrpc_settingsf_t settings;
+
+  /* PRIVATE: */
 
   /* available services */
   ezgrpc_services_t sv;
@@ -206,9 +227,13 @@ struct EZGRPCServer {
   ezgrpc_sessions_t ng;
 };
 
+int ezgrpc_init(void *(*)(void*), ezhandler_arg *ezarg);
+
 EZGRPCServer *ezgrpc_server_init(void);
 
 int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port);
+int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd);
+
 // int ezgrpc_server_set_logging_fd(EZGRPCServer *server_handle, int fd);
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
@@ -217,4 +242,5 @@ int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
 int ezgrpc_server_start(EZGRPCServer *server_handle);
 
 void ezgrpc_server_free(EZGRPCServer *server_handle);
+
 #endif /* EZGRPC_H */

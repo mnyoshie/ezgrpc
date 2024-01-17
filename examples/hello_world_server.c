@@ -1,17 +1,50 @@
 #include "ezgrpc.h"
 
-int whatever_service1(void *req, void *res, void *userdata){
+
+void *handler(void *userdata) {
+  /* userdata = (void**){(sigset_t*)signal_mask, (int*)shutdownfd};
+   */
+  ezhandler_arg *ezarg = userdata;
+  sigset_t *signal_mask = ezarg->signal_mask;
+  int shutdownfd = ezarg->shutdownfd;
+
+  int sig, res;
+  while(1) {
+    res = sigwait(signal_mask, &sig);
+    if (res != 0)
+      assert(0);
+    if (sig & (SIGINT | SIGTERM)) {
+      write(1, "SIGINT/SIGTERM received!\n", 25);
+      if (write(shutdownfd, "shutdown", 8) < 0)
+        perror("write");
+    } else
+      printf("unknown signal\n");
+  }
+}
+
+int whatever_service1(ezvec_t req, ezvec_t *res, void *userdata){
+  printf("called service1. received %zu bytes\n", req.data_len);
+  res->data = malloc(32);
   sleep(2);
-  printf("called service1\n");
   return 0;
 }
 
-int another_service2(void *req, void *res, void *userdata){
+int another_service2(ezvec_t req, ezvec_t *res, void *userdata){
   printf("called service2\n");
   return 0;
 }
 
 int main(){
+
+  int pfd[2];
+  if (pipe(pfd))
+    assert(0);
+  
+  sigset_t sig_mask;
+  ezhandler_arg ezarg = {&sig_mask, pfd[1]};
+  ezgrpc_init(handler, &ezarg);
+
+
   EZGRPCServer *server_handle = ezgrpc_server_init();
   assert(server_handle != NULL);
 
@@ -19,7 +52,11 @@ int main(){
   ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2);
 
   ezgrpc_server_set_listen_port(server_handle, 19009);
+  ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);
+
+  /* when a SIGINT/SIGTERM is received. this should return */
   ezgrpc_server_start(server_handle);
+
   ezgrpc_server_free(server_handle);
 
   return 0;
