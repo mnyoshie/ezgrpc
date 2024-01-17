@@ -1,3 +1,7 @@
+/* the author disclaims copyright to this example source code
+ * and releases it into the public domain
+ */
+
 #include "ezgrpc.h"
 
 
@@ -24,7 +28,13 @@ void *handler(void *userdata) {
 
 int whatever_service1(ezvec_t req, ezvec_t *res, void *userdata){
   printf("called service1. received %zu bytes\n", req.data_len);
-  res->data = malloc(32);
+  res->data_len = 3;
+  res->data = malloc(3);
+
+  /* protobuf serialized message */
+  res->data[0] = 0x08;
+  res->data[1] = 0x96;
+  res->data[2] = 0x02;
   sleep(2);
   return 0;
 }
@@ -42,7 +52,10 @@ int main(){
   
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};
-  ezgrpc_init(handler, &ezarg);
+  if (ezgrpc_init(handler, &ezarg)) {
+    fprintf(stderr, "fatal: couldn't init ezgrpc\n");
+    return 1;
+  }
 
 
   EZGRPCServer *server_handle = ezgrpc_server_init();

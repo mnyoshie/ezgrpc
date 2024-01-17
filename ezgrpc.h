@@ -3,6 +3,8 @@
 #ifndef EZGRPC_H
 #define EZGRPC_H
 
+#define _GNU_SOURCE
+
 #include <assert.h>
 #include <byteswap.h>
 #include <errno.h>
@@ -12,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
 
 #include <netdb.h>
 
@@ -27,7 +31,7 @@
 
 #include <nghttp2/nghttp2.h>
 
-#define EZGRPC_MAX_SESSIONS 3
+#define EZGRPC_MAX_SESSIONS 32
 
 enum ezgrpc_status_code_t {
   /* https://github.com/grpc/grpc/tree/master/include/grpcpp/impl/codegen */
@@ -127,6 +131,8 @@ struct ezgrpc_stream_t {
 
   /* to be filled when recv_data is processed */
   size_t send_data_len;
+  /* number of bytes sent */
+  size_t sent_data_len;
   uint8_t *send_data;
 
   /* to be filled and send when the recv_data is processed and
@@ -185,8 +191,8 @@ struct ezgrpc_session_t {
    */
   size_t volatile *volatile nb_sessions;
 
-  volatile size_t nb_open_streams;
-  volatile _Atomic size_t nb_running_callbacks;
+  volatile ssize_t nb_open_streams;
+  volatile _Atomic ssize_t nb_running_callbacks;
   /* the streams in a linked lists. allocated when we are
    * about to receive a HEADERS frame */
   ezgrpc_stream_t *st;
@@ -206,9 +212,9 @@ struct EZGRPCServer {
   /* listening socket */
   int sockfd;
 
-  /* we write to this when we shutdown our server.
-   * 0 is for reading.
-   * 1 is for writing. */
+  /* pipe(fd[2])
+   * fd[0] is for reading.
+   * fd[1] is for writing. */
 
   /* we pollin this descriptor.
    * if there is movement, shutdown the server
