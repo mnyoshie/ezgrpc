@@ -10,6 +10,9 @@
 
 volatile _Atomic int running_servers = 0;
 
+/* when a SIGINT/SIGTERM is received, we write to shutdownfd.
+ * all running servers will notice this and should return
+ */
 void *handler(void *userdata) {
   ezhandler_arg *ezarg = userdata;
   sigset_t *signal_mask = ezarg->signal_mask;
@@ -25,7 +28,7 @@ void *handler(void *userdata) {
       if (write(shutdownfd, "shutdown", 8) < 0)
         perror("write");
     } else
-      printf("unknown signal\n");
+      write(2, "unknown signal\n", 15);
   }
 }
 
@@ -48,7 +51,7 @@ int whatever_service1(ezvec_t req, ezvec_t *res, void *userdata){
   res->data[0] = 0x08;
   res->data[1] = 0x96;
   res->data[2] = 0x02;
-//  sleep(1);
+//sleep(1);
   return 0;
 }
 
@@ -64,6 +67,10 @@ int main(){
   if (pipe(pfd))
     assert(0);
   
+  /* NOTE: do not swap pfd[1] for pfd[0] and vice versa.
+   *
+   * ezgrpc_init() must be executed before any other ez functions
+   * are called */
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};
   if (ezgrpc_init(handler, &ezarg)) {

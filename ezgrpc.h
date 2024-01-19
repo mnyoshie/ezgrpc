@@ -71,6 +71,15 @@ struct ezvec_t {
   uint8_t *data;
 };
 
+/* grpc length-prefixed message */
+typedef struct ezgrpc_message_t ezgrpc_message_t;
+struct ezgrpc_message_t {
+  char compressed_flag;
+  uint32_t data_len;
+  char *data;
+  ezgrpc_message_t *next;
+};
+
 typedef struct ezhandler_arg ezhandler_arg;
 struct ezhandler_arg {
   sigset_t *signal_mask;
@@ -145,6 +154,13 @@ struct ezgrpc_stream_t {
 
 struct ezgrpc_service_t {
   char *service_path;
+
+  /* if this is enabled: rpc manyreq(stream req) returns (resp) */
+  char is_client_streaming;
+
+  /* if this is enabled: rpc manyresp(req) returns (stream resp) */
+  char is_server_streaming;
+
   ezgrpc_server_service_callback service_callback;
 };
 
@@ -158,7 +174,8 @@ struct ezgrpc_session_t {
 
   nghttp2_session *ngsession;
 
-  char *ip_addr;
+  char *client_addr;
+  int server_port;
 
   pthread_mutex_t ngmutex;
   pthread_t sthread;
@@ -217,7 +234,8 @@ struct EZGRPCServer {
    * fd[1] is for writing. */
 
   /* we pollin this descriptor.
-   * if there is movement, shutdown the server
+   * if there is movement, shutdown the server.
+   * shutdownfd = pfd[0]
    */
   int shutdownfd;
 
@@ -233,7 +251,12 @@ struct EZGRPCServer {
   ezgrpc_sessions_t ng;
 };
 
-int ezgrpc_init(void *(*)(void*), ezhandler_arg *ezarg);
+/* ezgrpc builtin signal handler. You can either use this by passing it 
+ * to ezgrpc_init, or build one of your own.
+ * */
+void *ezserver_signal_handler(void *userdata);
+
+int ezgrpc_init(void *(*signal_handler)(void*), ezhandler_arg *ezarg);
 
 EZGRPCServer *ezgrpc_server_init(void);
 

@@ -22,7 +22,7 @@ void *handler(void *userdata) {
       if (write(shutdownfd, "shutdown", 8) < 0)
         perror("write");
     } else
-      printf("unknown signal\n");
+      write(2, "unknown signal\n", 15);
   }
 }
 
@@ -35,7 +35,7 @@ int whatever_service1(ezvec_t req, ezvec_t *res, void *userdata){
   res->data[0] = 0x08;
   res->data[1] = 0x96;
   res->data[2] = 0x02;
-  sleep(2);
+  //sleep(2);
   return 0;
 }
 
