@@ -15,7 +15,8 @@
 #include "ezgrpc.h"
 
 // #define EZENABLE_DEBUG
-#define ezlogm(fmt, ... ) ezlogf(ezsession, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define ezlogm(fmt, ...)                                                       \
+  ezlogf(ezsession, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 /* value of pthread_self() */
 static pthread_t g_thread_self;
@@ -82,40 +83,6 @@ static void dump_decode_ascii(char *data, int len) {
   }
 }
 
-/* constructs a linked list from a prefixed-lengtn message */
-static ezgrpc_message_t *ezparse_grpc_message(void *buf, size_t len, int *nb_message) {
-  char *wire = buf;
-  if (len <= 4)
-    return NULL;
-    
-  ezgrpc_message_t *ezmessage_tail = NULL;
-
-  ezgrpc_message_t **ezmessage_head = &ezmessage_tail;
-
-
-  for (int seek = 0; seek < len;) {
-    assert(seek <= len);
-
-    ezgrpc_message_t *frame = calloc(1, sizeof(ezgrpc_message_t));
-    assert(frame != NULL);
-    frame->next = NULL;
-
-    frame->compressed_flag = wire[seek];
-    seek += 1;
-
-    frame->data_len = ntohl(*((uint32_t*)(wire + seek)));
-    seek += sizeof(uint32_t);
-
-    frame->data = wire + seek;
-    seek += frame->data_len;
-
-    *ezmessage_head  = frame;
-    ezmessage_head = &(frame->next);
-    (*nb_message)++;
-  }
-
-  return ezmessage_tail;
-}
 void ezdump(void *vdata, size_t len) {
   char *data = vdata;
   if (len == 0)
@@ -151,25 +118,6 @@ void ezdump(void *vdata, size_t len) {
   assert(len == cur);
 }
 
-void *ezserver_signal_handler(void *userdata) {
-  ezhandler_arg *ezarg = userdata;
-  sigset_t *signal_mask = ezarg->signal_mask;
-  int shutdownfd = ezarg->shutdownfd;
-
-  int sig, res;
-  while(1) {
-    res = sigwait(signal_mask, &sig);
-    if (res != 0)
-      assert(0);
-    if (sig & (SIGINT | SIGTERM)) {
-      write(1, "SIGINT/SIGTERM received!\n", 25);
-      if (write(shutdownfd, "shutdown", 8) < 0)
-        perror("write");
-    } else
-      write(2, "unknown signal\n", 15);
-  }
-}
-
 static char *ezgetdt() {
   static char buf[32] = {0};
   time_t t = time(NULL);
@@ -179,9 +127,10 @@ static char *ezgetdt() {
   return buf;
 }
 
-static void ezlogf(ezgrpc_session_t *ezsession, char *file,
-                   int line, char *fmt, ...) {
-  fprintf(stdout, "[%s @ %s:%d] %s ", ezgetdt(), file, line, ezsession->client_addr);
+static void ezlogf(ezgrpc_session_t *ezsession, char *file, int line, char *fmt,
+                   ...) {
+  fprintf(stdout, "[%s @ %s:%d] %s ", ezgetdt(), file, line,
+          ezsession->client_addr);
 
   va_list args;
   va_start(args, fmt);
@@ -189,12 +138,136 @@ static void ezlogf(ezgrpc_session_t *ezsession, char *file,
   va_end(args);
 }
 
-static void ezlog(char *fmt, ...) {
+void ezlog(char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   fprintf(stdout, "[%s] ", ezgetdt());
   vfprintf(stdout, fmt, args);
   va_end(args);
+}
+
+static void ezfree_message(ezgrpc_message_t *ezmessage) {
+  ezgrpc_message_t *snext;
+  for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = snext) {
+    snext = msg->next;
+    free(msg);
+    // printf("freed msg\n");
+  }
+}
+
+/* constructs a linked list from a prefixed-length message. */
+static ezgrpc_message_t *ezparse_grpc_message(ezvec_t vec, int *nb_message) {
+
+  char *wire = (char *)vec.data;
+  uint32_t len = vec.data_len;
+
+  if (len <= 4)
+    return NULL;
+
+  ezgrpc_message_t *ezmessage_tail = NULL;
+
+  ezgrpc_message_t **ezmessage_head = &ezmessage_tail;
+
+  size_t seek;
+  for (seek = 0; seek < len;) {
+    assert(seek <= len);
+
+    ezgrpc_message_t *frame = calloc(1, sizeof(ezgrpc_message_t));
+    if (frame == NULL) {
+      ezfree_message(ezmessage_tail);
+      printf("no mem\n");
+      return NULL;
+    }
+    frame->next = NULL;
+
+    frame->is_compressed = wire[seek];
+    seek += 1;
+
+    frame->data_len = ntohl(*((uint32_t *)(wire + seek)));
+    seek += sizeof(uint32_t);
+
+    frame->data = wire + seek;
+    seek += frame->data_len;
+
+    *ezmessage_head = frame;
+    ezmessage_head = &(frame->next);
+    (*nb_message)++;
+
+    if (seek > len) {
+      ezfree_message(ezmessage_tail);
+      ezlog("prefixed-length messages overflowed\n");
+      return NULL;
+    }
+
+    // printf("nb %d\n", *nb_message);
+  }
+
+  if (seek < len) {
+    ezfree_message(ezmessage_tail);
+    ezlog("prefixed-length messages underflowed\n");
+    return NULL;
+  }
+
+  return ezmessage_tail;
+}
+
+/* Turns linked lists into a raw data which can be sent
+ *
+ * input: ezmessage
+ * output: vec
+ */
+static int ezflatten_grpc_message(ezgrpc_message_t *ezmessage, ezvec_t *vec) {
+  size_t seek = 0;
+  size_t ssize = 0;
+
+  /* pre compute needed size */
+  for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = msg->next)
+    ssize += 5 + msg->data_len;
+
+  vec->data_len = ssize;
+  vec->data = malloc(ssize);
+  assert(vec->data != NULL);
+
+  for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = msg->next) {
+    vec->data[seek] = msg->is_compressed;
+    seek += 1;
+    *((uint32_t *)vec->data + seek) = htonl(msg->data_len);
+    seek += 4;
+    memcpy(vec->data + seek, msg->data, msg->data_len);
+    seek += (size_t)msg->data_len;
+  }
+
+  return 0;
+}
+
+static ezgrpc_message_t *ezdecompress_grpc_message(ezgrpc_message_t *ezmessage,
+                                                   int *nb_message) {
+  return NULL;
+}
+
+void *ezserver_signal_handler(void *userdata) {
+  ezhandler_arg *ezarg = userdata;
+  sigset_t *signal_mask = ezarg->signal_mask;
+  int shutdownfd = ezarg->shutdownfd;
+
+  int sig, res;
+  while (1) {
+    res = sigwait(signal_mask, &sig);
+    if (res != 0) {
+      write(2, "sigwait err\n", 12);
+      continue;
+    }
+    if (sig & (SIGINT | SIGTERM)) {
+      write(1, "SIGINT/SIGTERM received!\n", 25);
+      if (write(shutdownfd, "shutdown", 8) < 0)
+        perror("write");
+      continue;
+    }
+    if (sig & SIGPIPE)
+      continue;
+
+    write(2, "unknown signal\n", 15);
+  }
 }
 
 /* traverses the linked list */
@@ -220,8 +293,8 @@ static ezgrpc_stream_t *ezcreate_stream(ezgrpc_stream_t *stream) {
 /* only frees what is passed. it does not free all the linked lists */
 static void ezfree_stream(ezgrpc_stream_t *stream) {
   free(stream->service_path);
-  free(stream->recv_data);
-  free(stream->send_data);
+  free(stream->recv_data.data);
+  free(stream->send_data.data);
   free(stream);
 #ifdef EZENABLE_DEBUG
   printf("freed stream\n");
@@ -274,7 +347,9 @@ static void *session_reaper(void *userdata) {
     }
   }
   if (ezsession->nb_open_streams) {
-    ezlogm("warning: closing session but nb_open_streams = %d\n", ezsession->nb_open_streams);
+    ezlogm("warning: closing session but nb_open_streams = %d. I'm "
+           "intrigued... please contact the dev\n",
+           ezsession->nb_open_streams);
   }
 
   nghttp2_session_del(ezsession->ngsession);
@@ -310,11 +385,7 @@ static ssize_t data_source_read_callback(nghttp2_session *session,
     /* make sure what we're writing don't exceed the available length in buf */
     *data_flags = NGHTTP2_DATA_FLAG_NO_COPY | NGHTTP2_DATA_FLAG_NO_END_STREAM;
     nghttp2_submit_trailer(ezsession->ngsession, stream_id, trailers, 1);
-//    if (ezstream->send_data_len == ezstream->sent_data_len) {
-//      *data_flags = NGHTTP2_DATA_FLAG_EOF | NGHTTP2_DATA_FLAG_NO_END_STREAM;
-//      nghttp2_submit_trailer(ezsession->ngsession, stream_id, trailers, 1);
-//    }
-    return ezstream->send_data_len; 
+    return ezstream->send_data.data_len;
 
   } else {
     char grpc_status[32] = {0};
@@ -332,10 +403,10 @@ static ssize_t data_source_read_callback(nghttp2_session *session,
 }
 
 static void *send_response(void *userdata) {
-  //  ezcallback_t *cbdata = userdata;
   ezgrpc_stream_t *ezstream = userdata;
   ezgrpc_session_t *ezsession = ezstream->ezsession;
   ezsession->nb_running_callbacks++;
+  int res;
 
   nghttp2_nv nva[] = {
       {(void *)":status", (void *)"200", 7, 3},
@@ -343,58 +414,61 @@ static void *send_response(void *userdata) {
   };
   nghttp2_data_provider data_provider = {{.ptr = ezstream},
                                          data_source_read_callback};
-  if ((ezstream->recv_data_len <= 4))
+  if ((ezstream->recv_data.data_len <= 4)) {
     ezstream->grpc_status = EZGRPC_GRPC_STATUS_INVALID_ARGUMENT;
+    goto submit;
+  }
 
-  else if (ntohl(*(uint32_t *)(ezstream->recv_data + 1)) !=
-           (ezstream->recv_data_len - 5))
-    ezstream->grpc_status = EZGRPC_GRPC_STATUS_INVALID_ARGUMENT;
-
-  if (ezstream->svcall == NULL)
+  if (ezstream->svcall == NULL) {
     ezstream->grpc_status = EZGRPC_GRPC_STATUS_UNIMPLEMENTED;
+    goto submit;
+  }
 
   if (ezstream->grpc_status == EZGRPC_GRPC_STATUS_OK) {
     ezvec_t send_data = {0, NULL};
-    /* CALL THE ACTUAL SERVICE!! */
-    int res = ezstream->svcall(
-        (ezvec_t){ezstream->recv_data_len, ezstream->recv_data}, &send_data,
-        NULL);
+    /* segment the length-prefixed message into a linked lists */
+    int nb_message = 0;
+    ezgrpc_message_t *ezmsg_req =
+        ezparse_grpc_message(ezstream->recv_data, &nb_message);
+    if (ezmsg_req == NULL) {
+      ezstream->grpc_status = EZGRPC_GRPC_STATUS_INVALID_ARGUMENT;
+      goto submit;
+    }
+
+    ezgrpc_message_t *ezmsg_res = NULL;
+    /* XXX CALL THE ACTUAL SERVICE!! */
+    res = ezstream->svcall(ezmsg_req, &ezmsg_res, NULL);
+    ezfree_message(ezmsg_req);
     if (res) {
       ezstream->grpc_status = EZGRPC_GRPC_STATUS_INTERNAL;
-      free(send_data.data);
-      ezstream->send_data = NULL;
-      ezstream->send_data_len = 0;
-    }
-    else {
-      ezstream->send_data_len = send_data.data_len + 5;
-      ezstream->send_data = malloc(ezstream->send_data_len);
-      assert(ezstream->send_data != NULL);
+      goto submit;
+    } else {
+      ezvec_t vec;
+      if (ezflatten_grpc_message(ezmsg_res, &vec)) {
+        ezstream->grpc_status = EZGRPC_GRPC_STATUS_INTERNAL;
+        ezfree_message(ezmsg_res);
+        goto submit;
+      }
 
-      /* FIXME: don't add additional memcpy overhead */
-
-      /* set if the wire is compressed */
-      ezstream->send_data[0] = 0;
-      /* set the length of the wire */
-      *(uint32_t *)(ezstream->send_data + 1) = htonl(send_data.data_len);
-      /* copy the data wire */
-      memcpy(ezstream->send_data + 5, send_data.data, send_data.data_len);
-      free(send_data.data);
+      ezfree_message(ezmsg_req);
+      ezstream->send_data.data_len = vec.data_len;
+      ezstream->send_data.data = vec.data;
     }
   }
 
+submit:
   pthread_mutex_lock(&ezsession->ngmutex);
 #ifdef EZENABLE_DEBUG
   printf("submitting\n");
 #endif
 
-  int res;
   nghttp2_submit_response(ezsession->ngsession, ezstream->stream_id, nva, 2,
                           &data_provider);
-  while (1)  {
+  while (1) {
     if (ezsession->is_shutdown)
       break;
-    if (!(res = nghttp2_session_want_write(ezsession->ngsession))){
-      //ezsession->is_shutdown = 1;
+    if (!(res = nghttp2_session_want_write(ezsession->ngsession))) {
+      // ezsession->is_shutdown = 1;
       break;
     }
     if ((res = nghttp2_session_send(ezsession->ngsession))) {
@@ -436,12 +510,11 @@ static ssize_t ngrecv_callback(nghttp2_session *session, uint8_t *buf,
 
   ssize_t ret = recv(ezsession->sockfd, buf, length, 0);
   if (ret < 0)
-    return 0;
-    // return NGHTTP2_ERR_WOULDBLOCK;
+    return NGHTTP2_ERR_WOULDBLOCK;
 
 #ifdef EZENABLE_DEBUG
   printf("NGRECV RECV <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< %zu bytes\n", ret);
-  ezdump(buf, ret);
+  // ezdump(buf, ret);
   printf("NGRECV RECV >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
 #endif
 
@@ -620,7 +693,15 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
                                 frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
       return 0;
     }
-  }
+  } break;
+  case NGHTTP2_WINDOW_UPDATE:
+    // printf("frame window update %d\n",
+    // frame->window_update.window_size_increment); int res;
+    //    if ((res = nghttp2_session_set_local_window_size(session,
+    //    NGHTTP2_FLAG_NONE, frame->hd.stream_id,
+    //    frame->window_update.window_size_increment)) != 0)
+    //      assert(0);
+    break;
   default:
     break;
   }
@@ -639,14 +720,15 @@ static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
   if (stream == NULL)
     return 0;
 
-  void *recv_data = realloc(stream->recv_data, len + stream->recv_data_len);
+  void *recv_data =
+      realloc(stream->recv_data.data, len + stream->recv_data.data_len);
   if (recv_data == NULL)
     return NGHTTP2_ERR_CALLBACK_FAILURE;
 
-  memcpy(recv_data + stream->recv_data_len, data, len);
+  memcpy(recv_data + stream->recv_data.data_len, data, len);
 
-  stream->recv_data_len += len;
-  stream->recv_data = recv_data;
+  stream->recv_data.data_len += len;
+  stream->recv_data.data = recv_data;
 
   return 0;
 }
@@ -665,7 +747,9 @@ int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
   return 0;
 }
 
-int send_data_callback(nghttp2_session *session, nghttp2_frame *frame, const uint8_t *framehd, size_t length, nghttp2_data_source *source, void *user_data) {
+int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
+                       const uint8_t *framehd, size_t length,
+                       nghttp2_data_source *source, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
   ezgrpc_stream_t *ezstream = source->ptr;
 
@@ -687,25 +771,26 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame, const uin
   }
 
   /* send padlen */
-  if (write(ezsession->sockfd, &(uint8_t){frame->data.padlen - 1}, frame->data.padlen > 0) != (
-    frame->data.padlen > 0)) {
+  if (write(ezsession->sockfd, &(uint8_t){frame->data.padlen - 1},
+            frame->data.padlen > 0) != (frame->data.padlen > 0)) {
     assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   }
 
-   /* send data */ 
+  /* send data */
   res = 0, sent = 0;
   for (int tries = 0; tries < 12; tries++) {
-    if ((res = write(ezsession->sockfd, ezstream->send_data + sent, ezstream->send_data_len - sent)) < 0) {
+    if ((res = write(ezsession->sockfd, ezstream->send_data.data + sent,
+                     ezstream->send_data.data_len - sent)) < 0) {
       ezlog("");
       perror("write");
       continue;
     }
     sent += res;
-    if (sent == ezstream->send_data_len)
+    if (sent == ezstream->send_data.data_len)
       break;
   }
-  if (sent != ezstream->send_data_len) {
+  if (sent != ezstream->send_data.data_len) {
     assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   }
@@ -713,7 +798,7 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame, const uin
   /* send padding */
   res = 0, sent = 0;
   if (frame->data.padlen > 1) {
-    for (int i = 0; i < frame->data.padlen - 1; i++) { 
+    for (int i = 0; i < frame->data.padlen - 1; i++) {
       res += write(ezsession->sockfd, &(char){0}, 1);
     }
   }
@@ -723,8 +808,8 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame, const uin
   }
 
 #ifdef EZENABLE_DEBUG
-  ezdump((void*)framehd, length);
-  ezdump((void*)ezstream->send_data, ezstream->send_data_len);
+  ezdump((void *)framehd, length);
+  ezdump((void *)ezstream->send_data, ezstream->send_data_len);
 #endif
   return 0;
 }
@@ -795,9 +880,13 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
     assert(0); // TODO
   }
 
+  nghttp2_settings_entry siv[] = {
+      {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, 1024 * 1024},
+  };
   res =
-      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, NULL, 0);
+      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, siv, 2);
   if (res < 0) {
+
     assert(0); // TODO
   }
 
@@ -838,16 +927,24 @@ static void *start_session(void *userdata) {
   event[1].fd = ezsession->sockfd;
   event[1].events = POLLIN | POLLRDHUP;
 
+  int res;
+  /* send the settings */
+  while (nghttp2_session_want_write(ezsession->ngsession)) {
+    res = nghttp2_session_send(ezsession->ngsession);
+    if (res)
+      assert(0);
+  }
+
   while (1) {
     event[0].revents = 0;
     event[1].revents = 0;
     /* poll 2 minutes */
-    int res = poll(event, 2, 1000 * 60 * 2);
+    res = poll(event, 2, 1000 * 2);
     if (res == -1) {
       printf("poll: error\n");
       assert(0);
     } else if (res == 0) {
-      printf("timeout %d\n", ezsession->sockfd);
+      printf("timeout session %d\n", ezsession->sockfd);
       // session_reaper(ezsession);
       // pthread_exit(NULL);
       /* do whatever you want here. maybe close the connection or pause()
@@ -861,19 +958,22 @@ static void *start_session(void *userdata) {
 
     if (event[1].revents & POLLIN) {
       pthread_mutex_lock(&ezsession->ngmutex);
-      if (nghttp2_session_want_read(ezsession->ngsession)) {
-        res = nghttp2_session_recv(ezsession->ngsession);
+      if (!nghttp2_session_want_read(ezsession->ngsession))
+        break;
+      res = nghttp2_session_recv(ezsession->ngsession);
+      if (res) {
+        ezlog("nghttp2: %s. killing...\n", nghttp2_strerror(res));
+        pthread_mutex_unlock(&ezsession->ngmutex);
+        break;
+      }
+      while (nghttp2_session_want_write(ezsession->ngsession)) {
+        res = nghttp2_session_send(ezsession->ngsession);
         if (res) {
           ezlog("nghttp2: %s. killing...\n", nghttp2_strerror(res));
-	  break;
+          pthread_mutex_unlock(&ezsession->ngmutex);
+          break;
         }
-          //assert(0);
       }
-      //      while (nghttp2_session_want_write(ezsession->ngsession)) {
-      //        res = nghttp2_session_send(ezsession->ngsession);
-      //        if (res)
-      //          assert(0);
-      //      }
       pthread_mutex_unlock(&ezsession->ngmutex);
     }
     if (event[1].revents & (POLLRDHUP | POLLERR) || ezsession->is_shutdown) {
@@ -934,6 +1034,7 @@ int ezgrpc_init(void *(*handler)(void*), ezhandler_arg *ezarg) {
   sigemptyset(ezarg->signal_mask);
   sigaddset(ezarg->signal_mask, SIGINT);
   sigaddset(ezarg->signal_mask, SIGTERM);
+  sigaddset(ezarg->signal_mask, SIGPIPE);
   res = pthread_sigmask (SIG_BLOCK, ezarg->signal_mask, NULL);
   if (res != 0) {
     ezlog("fatal: pthread_sigmask %d\n", res);
@@ -949,14 +1050,9 @@ int ezgrpc_init(void *(*handler)(void*), ezhandler_arg *ezarg) {
   }
 
   /* make sure the signals won't propagate through the
-   * worker threads
+   * main thread and worker threads
    */
-  sigset_t ignore_mask;
-  sigemptyset(&ignore_mask);
-  sigaddset(&ignore_mask, SIGINT);
-  sigaddset(&ignore_mask, SIGTERM);
-  sigaddset(&ignore_mask, SIGPIPE);
-  res = pthread_sigmask(SIG_SETMASK, &ignore_mask, NULL);
+  res = pthread_sigmask(SIG_SETMASK, ezarg->signal_mask, NULL);
   if (res != 0) {
     ezlog("fatal: pthread_sigmask %d\n", res);
     return 1;
@@ -1013,6 +1109,7 @@ int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port) {
 }
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
+                              char flags,
                               ezgrpc_server_service_callback service_callback) {
   size_t nb_services = server_handle->sv.nb_services;
   ezgrpc_service_t *services = server_handle->sv.services;
@@ -1023,6 +1120,7 @@ int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
     return 1;
   services[nb_services].service_path = strdup(service_path);
   services[nb_services].service_callback = service_callback;
+  services[nb_services].service_flags = flags;
 
   server_handle->sv.nb_services = nb_services + 1;
   server_handle->sv.services = services;
@@ -1107,8 +1205,6 @@ int ezgrpc_server_start(EZGRPCServer *server_handle) {
       if (res) {
         ezlog("fatal: pthread_create %d\n", res);
         session_reaper(ezsession);
-
-
       }
     }
   }

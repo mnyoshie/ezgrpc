@@ -10,28 +10,6 @@
 
 volatile _Atomic int running_servers = 0;
 
-/* when a SIGINT/SIGTERM is received, we write to shutdownfd.
- * all running servers will notice this and should return
- */
-void *handler(void *userdata) {
-  ezhandler_arg *ezarg = userdata;
-  sigset_t *signal_mask = ezarg->signal_mask;
-  int shutdownfd = ezarg->shutdownfd;
-
-  int sig, res;
-  while(1) {
-    res = sigwait(signal_mask, &sig);
-    if (res != 0)
-      assert(0);
-    if (sig & (SIGINT | SIGTERM)) {
-      write(1, "SIGINT/SIGTERM received!\n", 25);
-      if (write(shutdownfd, "shutdown", 8) < 0)
-        perror("write");
-    } else
-      write(2, "unknown signal\n", 15);
-  }
-}
-
 void *start_server(void *userdata) {
   running_servers++;
   EZGRPCServer *server_handle = userdata;
@@ -42,38 +20,62 @@ void *start_server(void *userdata) {
   return userdata;
 }
 
-int whatever_service1(ezvec_t req, ezvec_t *res, void *userdata){
-  printf("called service1. received %zu bytes\n", req.data_len);
-  res->data_len = 3;
-  res->data = malloc(3);
+int whatever_service1(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userdata){
+  ezgrpc_message_t *msg = calloc(1, sizeof(ezgrpc_message_t));
+  printf("called service1. received %u bytes\n", req->data_len);
 
+  msg->is_compressed = 0;
+  msg->data_len = 3;
+  msg->data = malloc(3);
   /* protobuf serialized message */
-  res->data[0] = 0x08;
-  res->data[1] = 0x96;
-  res->data[2] = 0x02;
-//sleep(1);
+  msg->data[0] = 0x08;
+  msg->data[1] = 0x96;
+  msg->data[2] = 0x02;
+  msg->next = NULL;
+
+  *res = msg;
+  //sleep(2);
   return 0;
 }
 
-
-int another_service2(ezvec_t req, ezvec_t *res, void *userdata){
+int another_service2(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userdata){
   printf("called service2\n");
   return 0;
 }
 
 int main(){
 
+
   int pfd[2];
   if (pipe(pfd))
     assert(0);
   
-  /* NOTE: do not swap pfd[1] for pfd[0] and vice versa.
-   *
+  /*
    * ezgrpc_init() must be executed before any other ez functions
-   * are called */
+   * are called
+   *
+   *
+   * ezgrpc_init sets up 2 things:
+   *
+   *   (1) Sets up the ezserver_signal_handler() signal handler.
+   *
+   *   (2) Sets up so that any pthread_create after this won't
+   *   received SIGINT/SIGTERM/SIGPIPE, making sure
+   *   ezserver_signal_handler() only receives it.
+   *
+   * ezserver_signal_handler does mainly 2 things:
+   *
+   *   (1) When a SIGINT/SIGTERM is received, writes to pfd[1].
+   *   all running servers polling pfd[0] will notice this
+   *   and should return.
+   *  
+   *   (2) When a SIGPIPE is received, ignores it.
+   *
+   * NOTE: do not swap pfd[1] for pfd[0] and vice versa.
+   */
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};
-  if (ezgrpc_init(handler, &ezarg)) {
+  if (ezgrpc_init(ezserver_signal_handler, &ezarg)) {
     fprintf(stderr, "fatal: couldn't init ezgrpc\n");
     return 1;
   }
@@ -88,18 +90,18 @@ int main(){
   assert(server_handle3 != NULL);
 
   /* NOTE: check the return values */
-  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/whatever_service1", whatever_service1);
-  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/another_service2", another_service2);
+  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/whatever_service1", 0, whatever_service1);
+  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/another_service2", 0, another_service2);
   ezgrpc_server_set_listen_port(server_handle1, 19009);
   ezgrpc_server_set_shutdownfd(server_handle1, pfd[0]);
 
-  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/whatever_service1", whatever_service1);
-  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/another_service2", another_service2);
+  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/whatever_service1", 0, whatever_service1);
+  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/another_service2", 0, another_service2);
   ezgrpc_server_set_listen_port(server_handle2, 19010);
   ezgrpc_server_set_shutdownfd(server_handle2, pfd[0]);
 
-  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/whatever_service1", whatever_service1);
-  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/another_service2", another_service2);
+  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/whatever_service1", 0, whatever_service1);
+  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/another_service2", 0, another_service2);
   ezgrpc_server_set_listen_port(server_handle3, 19011);
   ezgrpc_server_set_shutdownfd(server_handle3, pfd[0]);
 

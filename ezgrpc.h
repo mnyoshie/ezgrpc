@@ -8,14 +8,13 @@
 #include <assert.h>
 #include <byteswap.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
 
 #include <netdb.h>
 
@@ -32,6 +31,14 @@
 #include <nghttp2/nghttp2.h>
 
 #define EZGRPC_MAX_SESSIONS 32
+
+#define EZGRPC_SERVICE_FLAG_NONE (0)
+
+/* rpc method(stream req) return res; */
+#define EZGRPC_SERVICE_FLAG_CLIENT_STREAMING (1 << 1)
+
+/* rpc method(req) return stream res; */
+#define EZGRPC_SERVICE_FLAG_SERVER_STREAMING (1 << 2)
 
 enum ezgrpc_status_code_t {
   /* https://github.com/grpc/grpc/tree/master/include/grpcpp/impl/codegen */
@@ -62,8 +69,10 @@ typedef struct ezgrpc_session_t ezgrpc_session_t;
 typedef struct ezgrpc_sessions_t ezgrpc_sessions_t;
 
 typedef struct ezvec_t ezvec_t;
+typedef struct ezgrpc_message_t ezgrpc_message_t;
 
-typedef int (*ezgrpc_server_service_callback)(ezvec_t req, ezvec_t *res,
+typedef int (*ezgrpc_server_service_callback)(ezgrpc_message_t *req,
+                                              ezgrpc_message_t **res,
                                               void *userdata);
 
 struct ezvec_t {
@@ -72,12 +81,11 @@ struct ezvec_t {
 };
 
 /* grpc length-prefixed message */
-typedef struct ezgrpc_message_t ezgrpc_message_t;
 struct ezgrpc_message_t {
-  char compressed_flag;
+  char is_compressed;
   uint32_t data_len;
   char *data;
-  ezgrpc_message_t *next;
+  ezgrpc_message_t **head, *next;
 };
 
 typedef struct ezhandler_arg ezhandler_arg;
@@ -112,7 +120,7 @@ struct ezgrpc_stream_t {
   char is_scheme_http;
   /* just a bool. if `te` is a trailer, or `te` does exists. */
   char is_te_trailers;
-  /* just a bool. if content type is application/grpc */
+  /* just a bool. if content type is application/grpc* */
   char is_content_grpc;
 
   /* stores `:path` */
@@ -135,14 +143,12 @@ struct ezgrpc_stream_t {
    */
   volatile int is_cancel;
 
-  size_t recv_data_len;
-  uint8_t *recv_data;
+  ezvec_t recv_data;
 
   /* to be filled when recv_data is processed */
-  size_t send_data_len;
   /* number of bytes sent */
   size_t sent_data_len;
-  uint8_t *send_data;
+  ezvec_t send_data;
 
   /* to be filled and send when the recv_data is processed and
    * the service is executed in another thread. this may also
@@ -155,11 +161,14 @@ struct ezgrpc_stream_t {
 struct ezgrpc_service_t {
   char *service_path;
 
-  /* if this is enabled: rpc manyreq(stream req) returns (resp) */
-  char is_client_streaming;
-
-  /* if this is enabled: rpc manyresp(req) returns (stream resp) */
-  char is_server_streaming;
+  /* available flags:
+   *
+   *   EZGRPC_SERVICE_FLAG_CLIENT_STREAMING
+   *   EZGRPC_SERVICE_FLAG_SERVER_STREAMING
+   *   EZGRPC_SERVICE_FLAG_NONE
+   *
+   */
+  char service_flags;
 
   ezgrpc_server_service_callback service_callback;
 };
@@ -251,12 +260,12 @@ struct EZGRPCServer {
   ezgrpc_sessions_t ng;
 };
 
-/* ezgrpc builtin signal handler. You can either use this by passing it 
+/* ezgrpc builtin signal handler. You can either use this by passing it
  * to ezgrpc_init, or build one of your own.
  * */
 void *ezserver_signal_handler(void *userdata);
 
-int ezgrpc_init(void *(*signal_handler)(void*), ezhandler_arg *ezarg);
+int ezgrpc_init(void *(*signal_handler)(void *), ezhandler_arg *ezarg);
 
 EZGRPCServer *ezgrpc_server_init(void);
 
@@ -266,6 +275,7 @@ int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd);
 // int ezgrpc_server_set_logging_fd(EZGRPCServer *server_handle, int fd);
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
+                              char service_flags,
                               ezgrpc_server_service_callback service_callback);
 
 int ezgrpc_server_start(EZGRPCServer *server_handle);
