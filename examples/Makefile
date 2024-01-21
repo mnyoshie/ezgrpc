@@ -1,11 +1,8 @@
-all: hello_world_server multi_server
+all: hello_world_server multi_server streaming_server_server
 
-hello_world_server : hello_world_server.c ../ezgrpc.c
-	gcc $^ -I.. -ggdb3 -lnghttp2 -lpthread -o $@
-
-multi_server : multi_server.c ../ezgrpc.c
-	gcc $^ -I.. -ggdb3 -lnghttp2 -lpthread -o $@
+%: %.c
+	gcc $< ../ezgrpc.c -I.. -ggdb3 -lnghttp2 -lpthread -o $@
 
 clean :
-	rm hello_world_server multi_server
+	rm hello_world_server multi_server streaming_server_server
 

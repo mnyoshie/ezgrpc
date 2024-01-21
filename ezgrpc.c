@@ -226,12 +226,15 @@ static int ezflatten_grpc_message(ezgrpc_message_t *ezmessage, ezvec_t *vec) {
 
   vec->data_len = ssize;
   vec->data = malloc(ssize);
-  assert(vec->data != NULL);
+  if (vec->data == NULL){
+    fprintf(stderr, "no mem\n");
+    return 1;
+  }
 
   for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = msg->next) {
     vec->data[seek] = msg->is_compressed;
     seek += 1;
-    *((uint32_t *)vec->data + seek) = htonl(msg->data_len);
+    *((uint32_t *)&vec->data[seek]) = htonl(msg->data_len);
     seek += 4;
     memcpy(vec->data + seek, msg->data, msg->data_len);
     seek += (size_t)msg->data_len;
@@ -450,7 +453,7 @@ static void *send_response(void *userdata) {
         goto submit;
       }
 
-      ezfree_message(ezmsg_req);
+      ezfree_message(ezmsg_res);
       ezstream->send_data.data_len = vec.data_len;
       ezstream->send_data.data = vec.data;
     }
@@ -646,8 +649,11 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
     }
     return 0;
   case NGHTTP2_DATA: {
-    if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM))
+    if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
+      /* If service is edge triggered. start sending data */ 
+
       return 0;
+    }
     /* We're received a data frame */
     ezgrpc_stream_t *ezstream =
         ezget_stream(ezsession->st, frame->hd.stream_id);
@@ -884,7 +890,7 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
       {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, 1024 * 1024},
   };
   res =
-      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, siv, 2);
+      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, siv, 1);
   if (res < 0) {
 
     assert(0); // TODO

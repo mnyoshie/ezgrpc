@@ -34,11 +34,21 @@
 
 #define EZGRPC_SERVICE_FLAG_NONE (0)
 
-/* rpc method(stream req) return res; */
-#define EZGRPC_SERVICE_FLAG_CLIENT_STREAMING (1 << 1)
+/* rpc service(stream req) returns(res); */
+#define EZGRPC_SERVICE_FLAG_CLIENT_STREAMING (1 << 0)
 
-/* rpc method(req) return stream res; */
-#define EZGRPC_SERVICE_FLAG_SERVER_STREAMING (1 << 2)
+/* rpc service(req) returns(stream res); */
+#define EZGRPC_SERVICE_FLAG_SERVER_STREAMING (1 << 1)
+
+/* in `edge triggered` (EDGET), the service starts sending replies
+ * even before an END_STREAM is received. If this is not
+ * set, the service start sending replies after an END_STREAM
+ * is received. In this case, we call it `end triggered`.
+ */
+#define EZGRPC_SERVICE_FLAG_EDGET (1 << 4)
+
+/* An END_STREAM is a HTTP2 flag in the HTTP2 frame header. */
+
 
 enum ezgrpc_status_code_t {
   /* https://github.com/grpc/grpc/tree/master/include/grpcpp/impl/codegen */
