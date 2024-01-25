@@ -43,8 +43,8 @@ int main(){
   EZGRPCServer *server_handle = ezgrpc_server_init();
   assert(server_handle != NULL);
 
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", 0, whatever_service1);
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", 0, another_service2);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1, 0);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2, 0);
 
   ezgrpc_server_set_listen_port(server_handle, 19009);
   ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);

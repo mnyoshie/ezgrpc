@@ -79,6 +79,7 @@ typedef struct ezgrpc_session_t ezgrpc_session_t;
 typedef struct ezgrpc_sessions_t ezgrpc_sessions_t;
 
 typedef struct ezvec_t ezvec_t;
+typedef struct ezlvec_t ezlvec_t;
 typedef struct ezgrpc_message_t ezgrpc_message_t;
 
 typedef int (*ezgrpc_server_service_callback)(ezgrpc_message_t *req,
@@ -90,12 +91,17 @@ struct ezvec_t {
   uint8_t *data;
 };
 
+struct ezlvec_t {
+  size_t data_len;
+  uint8_t *data;
+};
+
 /* grpc length-prefixed message */
 struct ezgrpc_message_t {
   char is_compressed;
   uint32_t data_len;
   char *data;
-  ezgrpc_message_t **head, *next;
+  ezgrpc_message_t *next;
 };
 
 typedef struct ezhandler_arg ezhandler_arg;
@@ -139,7 +145,10 @@ struct ezgrpc_stream_t {
   /* a function pointer to the service. to be initialized when
    * service_path do exist and is valid
    */
-  ezgrpc_server_service_callback svcall;
+  //ezgrpc_server_service_callback svcall;
+
+  /* a pointer to the available service in EZGRPCServer.sv */
+  ezgrpc_service_t *service;
 
   /* the thread. make sure to kill it when closing the session */
   pthread_t sthread;
@@ -285,8 +294,8 @@ int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd);
 // int ezgrpc_server_set_logging_fd(EZGRPCServer *server_handle, int fd);
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
-                              char service_flags,
-                              ezgrpc_server_service_callback service_callback);
+                              ezgrpc_server_service_callback service_callback,
+                              char service_flags);
 
 int ezgrpc_server_start(EZGRPCServer *server_handle);
 

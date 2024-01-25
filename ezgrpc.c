@@ -150,9 +150,71 @@ static void ezfree_message(ezgrpc_message_t *ezmessage) {
   ezgrpc_message_t *snext;
   for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = snext) {
     snext = msg->next;
+    free(msg->data);
     free(msg);
     // printf("freed msg\n");
   }
+}
+
+/* returns non zero if the message is not finish
+ * a positive value means an overflow: possibly the msg isnt finished
+ * a negative value means an underflow */
+static size_t ezcount_grpc_message(ezvec_t vec, int *nb_message) {
+  char *wire = (char *)vec.data;
+  ssize_t len = vec.data_len;
+  size_t seek, last_seek = 0;
+  for (seek = 0; seek < len;) {
+    seek += 1;
+
+    if (seek + 4 > len) {
+      ezlog("(1) prefixed-length messages overflowed\n");
+      return last_seek;
+    }
+    seek += ntohl(*((uint32_t *)(wire + seek)));
+    seek += sizeof(uint32_t);
+
+    if (nb_message != NULL && seek <= len) {
+      (*nb_message)++;
+      last_seek = seek;
+      continue;
+    }
+    break;
+  }
+
+  ezlog("lseek %zu len %zu\n", last_seek, len);
+
+  if (seek > len) {
+    ezlog("(2) prefixed-length messages overflowed\n");
+  }
+
+  if (seek < len) {
+    ezlog("prefixed-length messages underflowed\n");
+  }
+
+  return last_seek;
+}
+
+static int eztruncate_grpc_message(ezvec_t *vec) {
+  int nb_message = 0;
+
+  /* last valid seek before it overflowed */
+  size_t lvs = ezcount_grpc_message(*vec, &nb_message);
+  printf("lvs %zu\n", lvs);
+
+  assert(lvs <= vec->data_len);
+
+  uint8_t *buf = malloc(vec->data_len - lvs);
+  assert(buf != NULL); // TODO
+
+  memcpy(buf, vec->data + lvs, vec->data_len - lvs);
+
+  free(vec->data);
+
+  vec->data = buf;
+  vec->data_len = vec->data_len - lvs; 
+
+
+  return 0;
 }
 
 /* constructs a linked list from a prefixed-length message. */
@@ -167,6 +229,9 @@ static ezgrpc_message_t *ezparse_grpc_message(ezvec_t vec, int *nb_message) {
   ezgrpc_message_t *ezmessage_tail = NULL;
 
   ezgrpc_message_t **ezmessage_head = &ezmessage_tail;
+
+  if (ezcount_grpc_message(vec, nb_message) != (size_t)len)
+    return NULL;
 
   size_t seek;
   for (seek = 0; seek < len;) {
@@ -183,29 +248,25 @@ static ezgrpc_message_t *ezparse_grpc_message(ezvec_t vec, int *nb_message) {
     frame->is_compressed = wire[seek];
     seek += 1;
 
+    if (seek + 4 > len) {
+      ezlog("(3) prefixed-length messages overflowed\n");
+      free(frame);
+      ezfree_message(ezmessage_tail);
+      return NULL;
+    }
+
     frame->data_len = ntohl(*((uint32_t *)(wire + seek)));
     seek += sizeof(uint32_t);
 
-    frame->data = wire + seek;
+    frame->data = malloc(frame->data_len);
+    if (frame->data == NULL)
+      assert(0);
+
+    memcpy(frame->data, wire + seek, frame->data_len);
     seek += frame->data_len;
 
     *ezmessage_head = frame;
     ezmessage_head = &(frame->next);
-    (*nb_message)++;
-
-    if (seek > len) {
-      ezfree_message(ezmessage_tail);
-      ezlog("prefixed-length messages overflowed\n");
-      return NULL;
-    }
-
-    // printf("nb %d\n", *nb_message);
-  }
-
-  if (seek < len) {
-    ezfree_message(ezmessage_tail);
-    ezlog("prefixed-length messages underflowed\n");
-    return NULL;
   }
 
   return ezmessage_tail;
@@ -226,7 +287,7 @@ static int ezflatten_grpc_message(ezgrpc_message_t *ezmessage, ezvec_t *vec) {
 
   vec->data_len = ssize;
   vec->data = malloc(ssize);
-  if (vec->data == NULL){
+  if (vec->data == NULL) {
     fprintf(stderr, "no mem\n");
     return 1;
   }
@@ -246,31 +307,6 @@ static int ezflatten_grpc_message(ezgrpc_message_t *ezmessage, ezvec_t *vec) {
 static ezgrpc_message_t *ezdecompress_grpc_message(ezgrpc_message_t *ezmessage,
                                                    int *nb_message) {
   return NULL;
-}
-
-void *ezserver_signal_handler(void *userdata) {
-  ezhandler_arg *ezarg = userdata;
-  sigset_t *signal_mask = ezarg->signal_mask;
-  int shutdownfd = ezarg->shutdownfd;
-
-  int sig, res;
-  while (1) {
-    res = sigwait(signal_mask, &sig);
-    if (res != 0) {
-      write(2, "sigwait err\n", 12);
-      continue;
-    }
-    if (sig & (SIGINT | SIGTERM)) {
-      write(1, "SIGINT/SIGTERM received!\n", 25);
-      if (write(shutdownfd, "shutdown", 8) < 0)
-        perror("write");
-      continue;
-    }
-    if (sig & SIGPIPE)
-      continue;
-
-    write(2, "unknown signal\n", 15);
-  }
 }
 
 /* traverses the linked list */
@@ -409,7 +445,9 @@ static void *send_response(void *userdata) {
   ezgrpc_stream_t *ezstream = userdata;
   ezgrpc_session_t *ezsession = ezstream->ezsession;
   ezsession->nb_running_callbacks++;
+  ezgrpc_services_t *sv = ezsession->sv;
   int res;
+  ezstream->grpc_status = EZGRPC_GRPC_STATUS_OK;
 
   nghttp2_nv nva[] = {
       {(void *)":status", (void *)"200", 7, 3},
@@ -422,7 +460,8 @@ static void *send_response(void *userdata) {
     goto submit;
   }
 
-  if (ezstream->svcall == NULL) {
+  /* set up the parameters */
+  if (ezstream->service == NULL) {
     ezstream->grpc_status = EZGRPC_GRPC_STATUS_UNIMPLEMENTED;
     goto submit;
   }
@@ -440,7 +479,7 @@ static void *send_response(void *userdata) {
 
     ezgrpc_message_t *ezmsg_res = NULL;
     /* XXX CALL THE ACTUAL SERVICE!! */
-    res = ezstream->svcall(ezmsg_req, &ezmsg_res, NULL);
+    res = ezstream->service->service_callback(ezmsg_req, &ezmsg_res, NULL);
     ezfree_message(ezmsg_req);
     if (res) {
       ezstream->grpc_status = EZGRPC_GRPC_STATUS_INTERNAL;
@@ -581,8 +620,23 @@ static int on_header_callback(nghttp2_session *session,
     ezstream->is_method_post = (strlen("POST") == valuelen &&!strncmp("POST", (void *)value, valuelen));
   else if (strlen(scheme) == namelen && !strcmp(scheme, (void *)name))
     ezstream->is_scheme_http = (strlen("http") == valuelen &&!strncmp("http", (void *)value, valuelen));
-  else if (strlen(path) == namelen && !strcmp(path, (void *)name))
+  else if (strlen(path) == namelen && !strcmp(path, (void *)name)) {
     ezstream->service_path = strndup((void *)value, valuelen);
+    if (ezstream->service_path == NULL)
+      assert(0);
+
+    ezgrpc_service_t *service = NULL;
+    for (size_t i = 0; i < ezsession->sv->nb_services; i++) {
+      if (!strcmp(ezsession->sv->services[i].service_path, ezstream->service_path)) {
+        service = ezsession->sv->services + i;
+  #ifdef EZENABLE_DEBUG
+        printf("found %s\n", service->service_path);
+  #endif
+        break;
+      }
+    }
+    ezstream->service = service;
+  }
   else if (strlen("content-type") == namelen && !strcmp("content-type", (void *)name))
     ezstream->is_content_grpc = (strlen("application/grpc") <= valuelen && !strncmp("application/grpc", (void *)value, 16));
   else if (strlen("te") == namelen && !strcmp("te", (void *)name))
@@ -639,28 +693,43 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
     } else if (frame->settings.hd.flags & NGHTTP2_FLAG_ACK &&
                frame->settings.hd.length == 0) {
       /* OK. The client acknowledge our settings. do nothing */
-    } else
-      assert(0); // TODO
-    break;
+    } else {
+      nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
+                                frame->hd.stream_id,
+                                1); // XXX send appropriate code
+    }
+    return 0; // TODO
   case NGHTTP2_HEADERS:
+    if (!(frame->hd.flags & NGHTTP2_FLAG_END_HEADERS))
+      return 0;
+    /* if we've received an end stream in headers frame. send an RST. we
+     * expected a data */
     if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
       nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
                                 frame->hd.stream_id, 1);
-    }
-    return 0;
-  case NGHTTP2_DATA: {
-    if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
-      /* If service is edge triggered. start sending data */ 
-
       return 0;
     }
-    /* We're received a data frame */
+
     ezgrpc_stream_t *ezstream =
         ezget_stream(ezsession->st, frame->hd.stream_id);
-
-    if (ezstream == NULL || ezstream->service_path == NULL) {
+    if (ezstream == NULL) {
       nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
-                                frame->hd.stream_id, 1);
+                                frame->hd.stream_id,
+                                1); // XXX send appropriate code
+      return 0;
+    }
+
+    if (ezstream->service == NULL) {
+      ezstream->grpc_status = EZGRPC_GRPC_STATUS_UNIMPLEMENTED;
+      if (!pthread_equal(ezstream->sthread, g_thread_self))
+        return 0;
+      int res =
+          pthread_create(&ezstream->sthread, NULL, send_response, ezstream);
+      if (res) {
+        ezlogm("fatal: pthread_create %d\n", res);
+        nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
+                                  frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
+      }
       return 0;
     }
 
@@ -670,35 +739,60 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
                                 frame->hd.stream_id, 1);
       return 0;
     }
-    // printf("recv data len %zu\n", ezstream->recv_data_len);
 
-    ezgrpc_services_t *sv = ezsession->sv;
-    /* look up service path */
-    ezgrpc_server_service_callback svcall = NULL;
-    if (ezstream->service_path != NULL) {
-      for (size_t i = 0; i < sv->nb_services; i++) {
-        if (!strcmp(sv->services[i].service_path, ezstream->service_path)) {
-#ifdef EZENABLE_DEBUG
-          printf("found %s\n", sv->services[i].service_path);
-#endif
-          svcall = sv->services[i].service_callback;
-          break;
-        }
-      }
+    if (ezstream->service->service_flags & EZGRPC_SERVICE_FLAG_EDGET) {
+      nghttp2_nv nva[] = {
+          {(void *)":status", (void *)"200", 7, 3},
+          {(void *)"content-type", (void *)"application/grpc", 12, 16},
+      };
+      nghttp2_data_provider data_provider = {{.ptr = ezstream},
+                                             data_source_read_callback};
+      nghttp2_submit_headers(session, 0, frame->hd.stream_id, NULL, nva, 2, NULL);
     }
-    ezstream->grpc_status = EZGRPC_GRPC_STATUS_OK;
 
-    /* set up the parameters */
-    ezstream->svcall = svcall;
-
-    // ezgrpc_send_response(ezstream);
-    int res = pthread_create(&ezstream->sthread, NULL, send_response, ezstream);
-    if (res) {
-      ezlogm("fatal: pthread_create %d\n", res);
+    return 0;
+  case NGHTTP2_DATA: {
+    ezgrpc_stream_t *ezstream =
+        ezget_stream(ezsession->st, frame->hd.stream_id);
+    if (ezstream == NULL) {
       nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
-                                frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
+                                frame->hd.stream_id, 1);
       return 0;
     }
+    if (!pthread_equal(ezstream->sthread, g_thread_self))
+      return 0;
+
+    /* the service is edge triggered. start sending replies once messages are available */
+    if (ezstream->service->service_flags & EZGRPC_SERVICE_FLAG_EDGET) {
+      if (!pthread_equal(ezstream->sthread, g_thread_self))
+        return 0;
+      /* XXX: If service is edge triggered. start sending data */
+      int nb_message = 0;
+      size_t res = ezcount_grpc_message(ezstream->recv_data, &nb_message);
+      if (!nb_message)
+        return 0;
+
+      printf("EDGET nb_message %d\n", nb_message);
+
+      assert(res != 0);
+      assert(ezstream->service->service_callback != NULL);
+
+      return 0;
+    }
+    else {
+      if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM))
+        return 0;
+      // printf("recv data len %zu\n", ezstream->recv_data_len);
+  
+      int res = pthread_create(&ezstream->sthread, NULL, send_response, ezstream);
+      if (res) {
+        ezlogm("fatal: pthread_create %d\n", res);
+        nghttp2_submit_rst_stream(ezsession->ngsession, NGHTTP2_FLAG_NONE,
+                                  frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
+      }
+      return 0;
+    }
+    return 0;
   } break;
   case NGHTTP2_WINDOW_UPDATE:
     // printf("frame window update %d\n",
@@ -724,6 +818,9 @@ static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
   ezgrpc_session_t *ezsession = user_data;
   ezgrpc_stream_t *stream = ezget_stream(ezsession->st, stream_id);
   if (stream == NULL)
+    return 0;
+
+  if (!pthread_equal(stream->sthread, g_thread_self))
     return 0;
 
   void *recv_data =
@@ -758,10 +855,12 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
                        nghttp2_data_source *source, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
   ezgrpc_stream_t *ezstream = source->ptr;
+  assert(ezstream != NULL);
 
   /* send frame header */
   ssize_t res = 0, sent = 0;
-  for (int tries = 0; tries < 12; tries++) {
+  for (int tries = 0; tries < 32; tries++) {
+    /* len(framehd) == 9 */
     if ((res = write(ezsession->sockfd, framehd + sent, 9 - sent)) < 0) {
       ezlogm("");
       perror("write");
@@ -779,13 +878,13 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
   /* send padlen */
   if (write(ezsession->sockfd, &(uint8_t){frame->data.padlen - 1},
             frame->data.padlen > 0) != (frame->data.padlen > 0)) {
-    assert(0);
+    // assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   }
 
   /* send data */
   res = 0, sent = 0;
-  for (int tries = 0; tries < 12; tries++) {
+  for (int tries = 0; tries < 32; tries++) {
     if ((res = write(ezsession->sockfd, ezstream->send_data.data + sent,
                      ezstream->send_data.data_len - sent)) < 0) {
       ezlog("");
@@ -797,7 +896,7 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
       break;
   }
   if (sent != ezstream->send_data.data_len) {
-    assert(0);
+    // assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   }
 
@@ -809,13 +908,13 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
     }
   }
   if (frame->data.padlen > 1 && (frame->data.padlen - 1 != res)) {
-    assert(0);
+    // assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   }
 
 #ifdef EZENABLE_DEBUG
   ezdump((void *)framehd, length);
-  ezdump((void *)ezstream->send_data, ezstream->send_data_len);
+  ezdump((void *)ezstream->send_data.data, ezstream->send_data.data_len);
 #endif
   return 0;
 }
@@ -888,9 +987,10 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
 
   nghttp2_settings_entry siv[] = {
       {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, 1024 * 1024},
+      {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 32},
   };
   res =
-      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, siv, 1);
+      nghttp2_submit_settings(ezsession->ngsession, NGHTTP2_FLAG_NONE, siv, 2);
   if (res < 0) {
 
     assert(0); // TODO
@@ -1033,7 +1133,7 @@ static void *start_session(void *userdata) {
 int ezgrpc_init(void *(*handler)(void*), ezhandler_arg *ezarg) {
   int res = 0;
   
-  //g_thread_self = pthread_self();
+  g_thread_self = pthread_self();
 
   /* set up our signal handler to shutdown the server
    */
@@ -1065,6 +1165,31 @@ int ezgrpc_init(void *(*handler)(void*), ezhandler_arg *ezarg) {
   }
 
   return 0;
+}
+
+void *ezserver_signal_handler(void *userdata) {
+  ezhandler_arg *ezarg = userdata;
+  sigset_t *signal_mask = ezarg->signal_mask;
+  int shutdownfd = ezarg->shutdownfd;
+
+  int sig, res;
+  while (1) {
+    res = sigwait(signal_mask, &sig);
+    if (res != 0) {
+      write(2, "sigwait err\n", 12);
+      continue;
+    }
+    if (sig & (SIGINT | SIGTERM)) {
+      write(1, "SIGINT/SIGTERM received!\n", 25);
+      if (write(shutdownfd, "shutdown", 8) < 0)
+        perror("write");
+      continue;
+    }
+    if (sig & SIGPIPE)
+      continue;
+
+    write(2, "unknown signal\n", 15);
+  }
 }
 
 EZGRPCServer *ezgrpc_server_init() {
@@ -1115,8 +1240,8 @@ int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port) {
 }
 
 int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
-                              char flags,
-                              ezgrpc_server_service_callback service_callback) {
+                              ezgrpc_server_service_callback service_callback,
+                              char flags) {
   size_t nb_services = server_handle->sv.nb_services;
   ezgrpc_service_t *services = server_handle->sv.services;
 

@@ -1,6 +1,6 @@
 all: hello_world_server multi_server streaming_server_server
 
-%: %.c
+%: %.c ../ezgrpc.c
 	gcc $< ../ezgrpc.c -I.. -ggdb3 -lnghttp2 -lpthread -o $@
 
 clean :

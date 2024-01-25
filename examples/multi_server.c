@@ -90,18 +90,18 @@ int main(){
   assert(server_handle3 != NULL);
 
   /* NOTE: check the return values */
-  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/whatever_service1", 0, whatever_service1);
-  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/another_service2", 0, another_service2);
+  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/whatever_service1", whatever_service1, 0);
+  ezgrpc_server_add_service(server_handle1, "/test.yourAPI/another_service2", another_service2, 0);
   ezgrpc_server_set_listen_port(server_handle1, 19009);
   ezgrpc_server_set_shutdownfd(server_handle1, pfd[0]);
 
-  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/whatever_service1", 0, whatever_service1);
-  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/another_service2", 0, another_service2);
+  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/whatever_service1", whatever_service1, 0);
+  ezgrpc_server_add_service(server_handle2, "/test.yourAPI/another_service2", another_service2, 0);
   ezgrpc_server_set_listen_port(server_handle2, 19010);
   ezgrpc_server_set_shutdownfd(server_handle2, pfd[0]);
 
-  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/whatever_service1", 0, whatever_service1);
-  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/another_service2", 0, another_service2);
+  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/whatever_service1", whatever_service1, 0);
+  ezgrpc_server_add_service(server_handle3, "/test.yourAPI/another_service2", another_service2, 0);
   ezgrpc_server_set_listen_port(server_handle3, 19011);
   ezgrpc_server_set_shutdownfd(server_handle3, pfd[0]);
 

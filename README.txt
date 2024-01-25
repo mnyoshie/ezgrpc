@@ -2,7 +2,7 @@
 
 Still in its draft.
 
-requires: -lnghttp2 -lpthread
+requires: -lnghttp2 -lpthread -lz
 
 - does not support over TLS.
 - does not support streaming messages.

@@ -30,7 +30,7 @@ int whatever_service1(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userd
 
 int another_service2(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userdata){
   printf("called service2\n");
-  return 0;
+ return 0;
 }
 
 int main(){
@@ -50,8 +50,8 @@ int main(){
   assert(server_handle != NULL);
 
   int flags = EZGRPC_SERVICE_FLAG_SERVER_STREAMING | EZGRPC_SERVICE_FLAG_EDGET;
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", flags, whatever_service1);
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", 0, another_service2);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1, flags);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2, 0);
 
   ezgrpc_server_set_listen_port(server_handle, 19009);
   ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);
