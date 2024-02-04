@@ -86,21 +86,34 @@ typedef int (*ezgrpc_server_service_callback)(ezgrpc_message_t *req,
                                               ezgrpc_message_t **res,
                                               void *userdata);
 
+typedef char i8;
+typedef uint8_t u8;
+typedef int8_t s8;
+
+typedef int16_t i16;
+typedef uint16_t u16;
+
+typedef int32_t i32;
+typedef uint32_t u32;
+
+typedef int64_t i64;
+typedef uint64_t u64;
+
 struct ezvec_t {
   size_t data_len;
-  uint8_t *data;
+  u8 *data;
 };
 
 struct ezlvec_t {
   size_t data_len;
-  uint8_t *data;
+  u8 *data;
 };
 
 /* grpc length-prefixed message */
 struct ezgrpc_message_t {
-  char is_compressed;
-  uint32_t data_len;
-  char *data;
+  u8 is_compressed;
+  u32 data_len;
+  i8 *data;
   ezgrpc_message_t *next;
 };
 
@@ -113,34 +126,34 @@ struct ezhandler_arg {
 /* stores the values of a SETTINGS frame */
 typedef struct ezgrpc_settingsf_t ezgrpc_settingsf_t;
 struct ezgrpc_settingsf_t {
-  uint32_t header_table_size;
-  uint32_t enable_push;
-  uint32_t max_concurrent_streams;
-  uint32_t flow_control;
+  u32 header_table_size;
+  u32 enable_push;
+  u32 max_concurrent_streams;
+  u32 flow_control;
 };
 
 /* a stream is created when a HEADERS frame received. A HEADERS frame
  * contains atleast the following, or a representation of it: */
 typedef struct ezgrpc_stream_t ezgrpc_stream_t;
 struct ezgrpc_stream_t {
-  uint32_t stream_id;
+  u32 stream_id;
 
   /* the time the stream is received by the server in
    * unix epoch */
-  uint64_t time;
+  u64 time;
 
   /* a pointer to the session this stream belongs */
   ezgrpc_session_t *ezsession;
 
-  char is_method_post;
-  char is_scheme_http;
+  i8 is_method_post:1;
+  i8 is_scheme_http:1;
   /* just a bool. if `te` is a trailer, or `te` does exists. */
-  char is_te_trailers;
+  i8 is_te_trailers:1;
   /* just a bool. if content type is application/grpc* */
-  char is_content_grpc;
+  i8 is_content_grpc:1;
 
   /* stores `:path` */
-  char *service_path;
+  i8 *service_path;
 
   /* a function pointer to the service. to be initialized when
    * service_path do exist and is valid
@@ -154,13 +167,13 @@ struct ezgrpc_stream_t {
   pthread_t sthread;
 
   /* a pointer to ezsession.is_shutdown */
-  int volatile *is_shutdown;
+  u8 volatile *is_shutdown;
 
   /* is_cancel is set to 1 to notify the stream
    * has been cancelled by the client.
    * this actually does nothing. cancelling is discouraged!!
    */
-  volatile int is_cancel;
+  volatile u8 is_cancel;
 
   ezvec_t recv_data;
 
@@ -178,7 +191,13 @@ struct ezgrpc_stream_t {
 };
 
 struct ezgrpc_service_t {
-  char *service_path;
+  i8 *service_path;
+
+  /* incoming message deserializer */
+  int (*in_deserializer)(ezvec_t *in, ezvec_t *out);
+
+  /* outgoing message serializer */
+  int (*out_serializer)(ezvec_t *in, ezvec_t *out);
 
   /* available flags:
    *
@@ -187,7 +206,7 @@ struct ezgrpc_service_t {
    *   EZGRPC_SERVICE_FLAG_NONE
    *
    */
-  char service_flags;
+  i8 service_flags;
 
   ezgrpc_server_service_callback service_callback;
 };
@@ -202,8 +221,9 @@ struct ezgrpc_session_t {
 
   nghttp2_session *ngsession;
 
-  char *client_addr;
-  int server_port;
+  /* an ASCII string */
+  i8 client_addr[64];
+  u16 server_port;
 
   pthread_mutex_t ngmutex;
   pthread_t sthread;
@@ -211,7 +231,7 @@ struct ezgrpc_session_t {
   /* is_shutdown is set to 1 to notify the socket
    * has been closed and we need to shutdown the session
    */
-  volatile int is_shutdown;
+  volatile u8 is_shutdown;
 
   /* a copy of EZGRPCServer.shutdownfd */
   int shutdownfd;
@@ -242,7 +262,7 @@ struct ezgrpc_session_t {
    * about to receive a HEADERS frame */
   ezgrpc_stream_t *st;
 
-  int is_used;
+  u8 is_used;
 };
 
 struct ezgrpc_sessions_t {
@@ -252,14 +272,19 @@ struct ezgrpc_sessions_t {
 
 typedef struct EZGRPCServer EZGRPCServer;
 struct EZGRPCServer {
-  uint16_t port;
+  i8 is_server_ipv4:1;
+  i8 is_server_ipv6:1;
+
+  u16 ipv4_port;
+  u16 ipv6_port;
 
   /* listening socket */
-  int sockfd;
+  int ipv4_sockfd;
+  int ipv6_sockfd;
 
   /* pipe(fd[2])
-   * fd[0] is for reading.
-   * fd[1] is for writing. */
+   * pfd[0] is for reading.
+   * pfd[1] is for writing. */
 
   /* we pollin this descriptor.
    * if there is movement, shutdown the server.
@@ -288,14 +313,18 @@ int ezgrpc_init(void *(*signal_handler)(void *), ezhandler_arg *ezarg);
 
 EZGRPCServer *ezgrpc_server_init(void);
 
-int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port);
+int ezgrpc_server_set_ipv4_listen_port(EZGRPCServer *server_handle, u16 port);
+int ezgrpc_server_set_ipv6_listen_port(EZGRPCServer *server_handle, u16 port);
+
 int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd);
 
 // int ezgrpc_server_set_logging_fd(EZGRPCServer *server_handle, int fd);
 
-int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
+int ezgrpc_server_add_service(EZGRPCServer *server_handle, i8 *service_path,
                               ezgrpc_server_service_callback service_callback,
-                              char service_flags);
+                              int (*in_deserializer)(ezvec_t *in, ezvec_t *out),
+                              int (*out_serializer)(ezvec_t *in, ezvec_t *out),
+                              i8 service_flags);
 
 int ezgrpc_server_start(EZGRPCServer *server_handle);
 

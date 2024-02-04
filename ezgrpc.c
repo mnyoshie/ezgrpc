@@ -21,7 +21,7 @@
 /* value of pthread_self() */
 static pthread_t g_thread_self;
 
-static char *grpc_status2str(ezgrpc_status_code_t status) {
+static i8 *grpc_status2str(ezgrpc_status_code_t status) {
   switch (status) {
   case EZGRPC_GRPC_STATUS_OK:
     return "";
@@ -60,8 +60,8 @@ static char *grpc_status2str(ezgrpc_status_code_t status) {
   }
 }
 
-static void dump_decode_binary(char *data, int len) {
-  char look_up[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+static void dump_decode_binary(i8 *data, size_t len) {
+  i8 look_up[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
                       '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   for (int i = 0; i < len; i++) {
     putchar(look_up[(data[i] >> 4) & 0x0f]);
@@ -72,7 +72,7 @@ static void dump_decode_binary(char *data, int len) {
   }
 }
 
-static void dump_decode_ascii(char *data, int len) {
+static void dump_decode_ascii(i8 *data, size_t len) {
   for (int i = 0; i < len; i++) {
     if (data[i] < 0x20) {
       putchar('.');
@@ -84,7 +84,7 @@ static void dump_decode_ascii(char *data, int len) {
 }
 
 void ezdump(void *vdata, size_t len) {
-  char *data = vdata;
+  i8 *data = vdata;
   if (len == 0)
     return;
 
@@ -118,8 +118,8 @@ void ezdump(void *vdata, size_t len) {
   assert(len == cur);
 }
 
-static char *ezgetdt() {
-  static char buf[32] = {0};
+static i8 *ezgetdt() {
+  static i8 buf[32] = {0};
   time_t t = time(NULL);
   struct tm stm = *localtime(&t);
   snprintf(buf, 32, "%d-%02d-%02d %02d:%02d:%02d", stm.tm_year + 1900,
@@ -127,7 +127,7 @@ static char *ezgetdt() {
   return buf;
 }
 
-static void ezlogf(ezgrpc_session_t *ezsession, char *file, int line, char *fmt,
+static void ezlogf(ezgrpc_session_t *ezsession, i8 *file, int line, i8 *fmt,
                    ...) {
   fprintf(stdout, "[%s @ %s:%d] %s ", ezgetdt(), file, line,
           ezsession->client_addr);
@@ -138,7 +138,7 @@ static void ezlogf(ezgrpc_session_t *ezsession, char *file, int line, char *fmt,
   va_end(args);
 }
 
-void ezlog(char *fmt, ...) {
+void ezlog(i8 *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   fprintf(stdout, "[%s] ", ezgetdt());
@@ -156,11 +156,11 @@ static void ezfree_message(ezgrpc_message_t *ezmessage) {
   }
 }
 
-/* returns non zero if the message is not finish
- * a positive value means an overflow: possibly the msg isnt finished
- * a negative value means an underflow */
+/* returns last_seek. if the return value equals vec.len, then the message
+ * is complete and not truncateda.
+ */
 static size_t ezcount_grpc_message(ezvec_t vec, int *nb_message) {
-  char *wire = (char *)vec.data;
+  i8 *wire = (i8 *)vec.data;
   ssize_t len = vec.data_len;
   size_t seek, last_seek = 0;
   for (seek = 0; seek < len;) {
@@ -170,11 +170,12 @@ static size_t ezcount_grpc_message(ezvec_t vec, int *nb_message) {
       ezlog("(1) prefixed-length messages overflowed\n");
       return last_seek;
     }
-    seek += ntohl(*((uint32_t *)(wire + seek)));
-    seek += sizeof(uint32_t);
+    seek += ntohl(*((u32 *)(wire + seek)));
+    seek += sizeof(u32);
 
-    if (nb_message != NULL && seek <= len) {
-      (*nb_message)++;
+    if (seek <= len) {
+      if (nb_message != NULL)
+        (*nb_message)++;
       last_seek = seek;
       continue;
     }
@@ -203,7 +204,7 @@ static int eztruncate_grpc_message(ezvec_t *vec) {
 
   assert(lvs <= vec->data_len);
 
-  uint8_t *buf = malloc(vec->data_len - lvs);
+  u8 *buf = malloc(vec->data_len - lvs);
   assert(buf != NULL); // TODO
 
   memcpy(buf, vec->data + lvs, vec->data_len - lvs);
@@ -220,8 +221,8 @@ static int eztruncate_grpc_message(ezvec_t *vec) {
 /* constructs a linked list from a prefixed-length message. */
 static ezgrpc_message_t *ezparse_grpc_message(ezvec_t vec, int *nb_message) {
 
-  char *wire = (char *)vec.data;
-  uint32_t len = vec.data_len;
+  i8 *wire = (i8 *)vec.data;
+  u32 len = vec.data_len;
 
   if (len <= 4)
     return NULL;
@@ -255,8 +256,8 @@ static ezgrpc_message_t *ezparse_grpc_message(ezvec_t vec, int *nb_message) {
       return NULL;
     }
 
-    frame->data_len = ntohl(*((uint32_t *)(wire + seek)));
-    seek += sizeof(uint32_t);
+    frame->data_len = ntohl(*((u32 *)(wire + seek)));
+    seek += sizeof(u32);
 
     frame->data = malloc(frame->data_len);
     if (frame->data == NULL)
@@ -295,7 +296,7 @@ static int ezflatten_grpc_message(ezgrpc_message_t *ezmessage, ezvec_t *vec) {
   for (ezgrpc_message_t *msg = ezmessage; msg != NULL; msg = msg->next) {
     vec->data[seek] = msg->is_compressed;
     seek += 1;
-    *((uint32_t *)&vec->data[seek]) = htonl(msg->data_len);
+    *((u32 *)&vec->data[seek]) = htonl(msg->data_len);
     seek += 4;
     memcpy(vec->data + seek, msg->data, msg->data_len);
     seek += (size_t)msg->data_len;
@@ -310,7 +311,7 @@ static ezgrpc_message_t *ezdecompress_grpc_message(ezgrpc_message_t *ezmessage,
 }
 
 /* traverses the linked list */
-static ezgrpc_stream_t *ezget_stream(ezgrpc_stream_t *stream, uint32_t id) {
+static ezgrpc_stream_t *ezget_stream(ezgrpc_stream_t *stream, u32 id) {
   for (ezgrpc_stream_t *s = stream; s != NULL; s = s->next) {
     if (s->stream_id == id)
       return s;
@@ -340,7 +341,7 @@ static void ezfree_stream(ezgrpc_stream_t *stream) {
 #endif
 }
 
-static int ezremove_stream(ezgrpc_stream_t **stream, uint32_t id) {
+static int ezremove_stream(ezgrpc_stream_t **stream, u32 id) {
   ezgrpc_stream_t **s = stream;
   while (*s != NULL && (*s)->stream_id != id)
     s = &(*s)->next;
@@ -394,10 +395,9 @@ static void *session_reaper(void *userdata) {
   nghttp2_session_del(ezsession->ngsession);
   shutdown(ezsession->sockfd, SHUT_RDWR);
 
-  printf("session got reaped\n");
+  printf("session got reaped %d\n", ezsession->sockfd);
   fflush(stdout);
 
-  free(ezsession->client_addr);
 
   /* is_used = 0 */
   memset(ezsession, 0, sizeof(ezgrpc_session_t));
@@ -406,8 +406,8 @@ static void *session_reaper(void *userdata) {
 }
 
 static ssize_t data_source_read_callback(nghttp2_session *session,
-                                         int32_t stream_id, uint8_t *buf,
-                                         size_t length, uint32_t *data_flags,
+                                         i32 stream_id, u8 *buf,
+                                         size_t length, u32 *data_flags,
                                          nghttp2_data_source *source,
                                          void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
@@ -427,9 +427,9 @@ static ssize_t data_source_read_callback(nghttp2_session *session,
     return ezstream->send_data.data_len;
 
   } else {
-    char grpc_status[32] = {0};
+    i8 grpc_status[32] = {0};
     int len = snprintf(grpc_status, 31, "%d", ezstream->grpc_status);
-    char *grpc_message = grpc_status2str(ezstream->grpc_status);
+    i8 *grpc_message = grpc_status2str(ezstream->grpc_status);
     nghttp2_nv trailers[] = {
         {(void *)"grpc-status", (void *)grpc_status, 11, len},
         {(void *)"grpc-message", (void *)grpc_message, 12,
@@ -530,7 +530,7 @@ submit:
 
 /* ----------- BEGIN NGHTTP2 CALLBACKS ------------------*/
 
-static ssize_t ngsend_callback(nghttp2_session *session, const uint8_t *data,
+static ssize_t ngsend_callback(nghttp2_session *session, const u8 *data,
                                size_t length, int flags, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
 
@@ -546,7 +546,7 @@ static ssize_t ngsend_callback(nghttp2_session *session, const uint8_t *data,
   return ret;
 }
 
-static ssize_t ngrecv_callback(nghttp2_session *session, uint8_t *buf,
+static ssize_t ngrecv_callback(nghttp2_session *session, u8 *buf,
                                size_t length, int flags, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
 
@@ -594,9 +594,9 @@ static int on_begin_headers_callback(nghttp2_session *session,
 /* ok, here's the header name and value. this will be called from time to time
  */
 static int on_header_callback(nghttp2_session *session,
-                              const nghttp2_frame *frame, const uint8_t *name,
-                              size_t namelen, const uint8_t *value,
-                              size_t valuelen, uint8_t flags, void *user_data) {
+                              const nghttp2_frame *frame, const u8 *name,
+                              size_t namelen, const u8 *value,
+                              size_t valuelen, u8 flags, void *user_data) {
 #ifdef EZENABLE_DEBUG
   printf(">>>>>>>>>>>>>>>>> HEADER CALLBACK %d <<<<<<<<<<<<<<<<\n",
          frame->hd.stream_id);
@@ -612,9 +612,9 @@ static int on_header_callback(nghttp2_session *session,
     return 1;
   }
 
-  char *method = ":method";
-  char *scheme = ":scheme";
-  char *path = ":path";
+  i8 *method = ":method";
+  i8 *scheme = ":scheme";
+  i8 *path = ":path";
   /* clang-format off */
   if (strlen(method) == namelen && !strcmp(method, (void *)name))
     ezstream->is_method_post = (strlen("POST") == valuelen &&!strncmp("POST", (void *)value, valuelen));
@@ -762,24 +762,35 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
     if (!pthread_equal(ezstream->sthread, g_thread_self))
       return 0;
 
-    /* the service is edge triggered. start sending replies once messages are available */
+    /* XXX: If service is edge triggered. start sending data */
     if (ezstream->service->service_flags & EZGRPC_SERVICE_FLAG_EDGET) {
       if (!pthread_equal(ezstream->sthread, g_thread_self))
         return 0;
-      /* XXX: If service is edge triggered. start sending data */
       int nb_message = 0;
+      printf("1 EDGET nb_message %d\n", nb_message);
+      /* returns the index in which the last valid message */
       size_t res = ezcount_grpc_message(ezstream->recv_data, &nb_message);
-      if (!nb_message)
+
+      /* the service is edge triggered. start sending replies once messages are available */
+      /* message is unfinished; return */
+      if (!nb_message || !res)
         return 0;
 
-      printf("EDGET nb_message %d\n", nb_message);
+      printf("2 EDGET nb_message %d\n", nb_message);
 
-      assert(res != 0);
+      ezgrpc_message_t *ezmessage = ezparse_grpc_message((ezvec_t){res, ezstream->recv_data.data}, NULL);
+      printf("3 EDGET nb_message %d\n", nb_message);
+
       assert(ezstream->service->service_callback != NULL);
+      if (ezmessage == NULL)
+        return 0;
 
       return 0;
     }
     else {
+      /* if the service is end triggered. start sending replies when an end stream is
+       * received 
+       * */
       if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM))
         return 0;
       // printf("recv data len %zu\n", ezstream->recv_data_len);
@@ -808,8 +819,8 @@ int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
   return 0;
 }
 
-static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
-                                       int32_t stream_id, const uint8_t *data,
+static int on_data_chunk_recv_callback(nghttp2_session *session, u8 flags,
+                                       i32 stream_id, const u8 *data,
                                        size_t len, void *user_data) {
 #ifdef EZENABLE_DEBUG
   printf(">>>>>>>>>>> DATA CHUNK RECEIVED CALLBACK STREAM %d <<<<<<<<<<<<\n",
@@ -836,8 +847,8 @@ static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
   return 0;
 }
 
-int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
-                             uint32_t error_code, void *user_data) {
+int on_stream_close_callback(nghttp2_session *session, i32 stream_id,
+                             u32 error_code, void *user_data) {
 #ifdef EZENABLE_DEBUG
   printf("STREAM %d CLOSED\n", stream_id);
 #endif
@@ -851,7 +862,7 @@ int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
 }
 
 int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
-                       const uint8_t *framehd, size_t length,
+                       const u8 *framehd, size_t length,
                        nghttp2_data_source *source, void *user_data) {
   ezgrpc_session_t *ezsession = user_data;
   ezgrpc_stream_t *ezstream = source->ptr;
@@ -876,7 +887,7 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
   }
 
   /* send padlen */
-  if (write(ezsession->sockfd, &(uint8_t){frame->data.padlen - 1},
+  if (write(ezsession->sockfd, &(u8){frame->data.padlen - 1},
             frame->data.padlen > 0) != (frame->data.padlen > 0)) {
     // assert(0);
     return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
@@ -904,7 +915,7 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
   res = 0, sent = 0;
   if (frame->data.padlen > 1) {
     for (int i = 0; i < frame->data.padlen - 1; i++) {
-      res += write(ezsession->sockfd, &(char){0}, 1);
+      res += write(ezsession->sockfd, &(i8){0}, 1);
     }
   }
   if (frame->data.padlen > 1 && (frame->data.padlen - 1 != res)) {
@@ -931,7 +942,32 @@ int makenonblock(int sockfd) {
   return 0;
 }
 
-static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
+static int server_setup_ngcallbacks(nghttp2_session_callbacks *ngcallbacks) {
+  /* clang-format off */
+  nghttp2_session_callbacks_set_send_callback(ngcallbacks, ngsend_callback);
+  nghttp2_session_callbacks_set_recv_callback(ngcallbacks, ngrecv_callback);
+
+  /* prepares and allocates memory for the incoming HEADERS frame */
+  nghttp2_session_callbacks_set_on_begin_headers_callback(ngcallbacks, on_begin_headers_callback);
+  /* we received that HEADERS frame. now here's the http2 fields */
+  nghttp2_session_callbacks_set_on_header_callback(ngcallbacks, on_header_callback);
+  /* we received a frame. do something about it */
+  nghttp2_session_callbacks_set_on_frame_recv_callback(ngcallbacks, on_frame_recv_callback);
+
+  //  nghttp2_session_callbacks_set_on_frame_send_callback(callbacks,
+  //                                                       on_frame_send_callback);
+  nghttp2_session_callbacks_set_on_data_chunk_recv_callback(ngcallbacks, on_data_chunk_recv_callback);
+  nghttp2_session_callbacks_set_on_stream_close_callback(ngcallbacks, on_stream_close_callback);
+  nghttp2_session_callbacks_set_send_data_callback(ngcallbacks, send_data_callback);
+  //  nghttp2_session_callbacks_set_before_frame_send_callback(callbacks,
+  //  before_frame_send_callback);
+
+  /* clang-format on */
+
+  return 0;
+}
+
+static ezgrpc_session_t *server_accept(int domain, int sockfd, struct sockaddr *client_addr,
                                        int socklen, void *userdata) {
   EZGRPCServer *server_handle = userdata;
   if (server_handle->ng.nb_sessions >= EZGRPC_MAX_SESSIONS) {
@@ -958,25 +994,8 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
     shutdown(sockfd, SHUT_RDWR);
   }
 
-  /* clang-format off */
-  nghttp2_session_callbacks_set_send_callback(ngcallbacks, ngsend_callback);
-  nghttp2_session_callbacks_set_recv_callback(ngcallbacks, ngrecv_callback);
 
-  /* prepares and allocates memory for the incoming HEADERS frame */
-  nghttp2_session_callbacks_set_on_begin_headers_callback(ngcallbacks, on_begin_headers_callback);
-  /* we received that HEADERS frame. now here's the http2 fields */
-  nghttp2_session_callbacks_set_on_header_callback(ngcallbacks, on_header_callback);
-  /* we received a frame. do something about it */
-  nghttp2_session_callbacks_set_on_frame_recv_callback(ngcallbacks, on_frame_recv_callback);
-
-  //  nghttp2_session_callbacks_set_on_frame_send_callback(callbacks,
-  //                                                       on_frame_send_callback);
-  nghttp2_session_callbacks_set_on_data_chunk_recv_callback(ngcallbacks, on_data_chunk_recv_callback);
-  nghttp2_session_callbacks_set_on_stream_close_callback(ngcallbacks, on_stream_close_callback);
-  nghttp2_session_callbacks_set_send_data_callback(ngcallbacks, send_data_callback);
-  //  nghttp2_session_callbacks_set_before_frame_send_callback(callbacks,
-  //  before_frame_send_callback);
-  /* clang-format on */
+  server_setup_ngcallbacks(ngcallbacks);
 
   res =
       nghttp2_session_server_new(&ezsession->ngsession, ngcallbacks, ezsession);
@@ -999,7 +1018,9 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
   if (makenonblock(sockfd))
     assert(0);
 
-  res = setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&(int){1},
+  res = setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (int *)&(int){1},
+                   sizeof(int));
+  res = setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, (int *)&(int){1},
                    sizeof(int));
   if (res < 0) {
     assert(0); // TODO
@@ -1007,9 +1028,18 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
 
   ezsession->sockfd = sockfd;
   ezsession->shutdownfd = server_handle->shutdownfd;
-  ezsession->client_addr =
-      strdup(inet_ntoa(((struct sockaddr_in *)client_addr)->sin_addr));
-  ezsession->server_port = server_handle->port;
+  switch (domain) {
+    case AF_INET:
+      inet_ntop(AF_INET, &((struct sockaddr_in *)client_addr)->sin_addr.s_addr, ezsession->client_addr, sizeof(ezsession->client_addr) - 1);
+      ezsession->server_port = server_handle->ipv4_port;
+      break;
+    case AF_INET6:
+      inet_ntop(AF_INET6, ((struct sockaddr_in6 *)client_addr)->sin6_addr.s6_addr, ezsession->client_addr, sizeof(ezsession->client_addr) - 1);
+      ezsession->server_port = server_handle->ipv6_port;
+      break;
+    default:
+    assert(0);
+  }
   ezsession->sv = &server_handle->sv;
   ezsession->ngmutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
   ezsession->st = NULL;
@@ -1022,6 +1052,7 @@ static ezgrpc_session_t *server_accept(int sockfd, struct sockaddr *client_addr,
   server_handle->ng.nb_sessions++;
   return ezsession;
 }
+
 
 static void *start_session(void *userdata) {
   ezgrpc_session_t *ezsession = userdata;
@@ -1064,8 +1095,10 @@ static void *start_session(void *userdata) {
 
     if (event[1].revents & POLLIN) {
       pthread_mutex_lock(&ezsession->ngmutex);
-      if (!nghttp2_session_want_read(ezsession->ngsession))
+      if (!nghttp2_session_want_read(ezsession->ngsession)) {
+        pthread_mutex_unlock(&ezsession->ngmutex);
         break;
+      }
       res = nghttp2_session_recv(ezsession->ngsession);
       if (res) {
         ezlog("nghttp2: %s. killing...\n", nghttp2_strerror(res));
@@ -1194,11 +1227,16 @@ void *ezserver_signal_handler(void *userdata) {
 
 EZGRPCServer *ezgrpc_server_init() {
   /* clang-format on */
-  EZGRPCServer *server_handle = malloc(sizeof(EZGRPCServer));
+  EZGRPCServer *server_handle = calloc(1, sizeof(EZGRPCServer));
   if (server_handle == NULL)
     return NULL;
 
-  server_handle->port = 8080;
+  server_handle->is_server_ipv4 = 0;
+  server_handle->is_server_ipv6 = 0;
+
+  server_handle->ipv4_port = -1;
+  server_handle->ipv6_port = -1;
+
   server_handle->shutdownfd = -1;
 
   server_handle->sv.nb_services = 0;
@@ -1226,7 +1264,13 @@ void ezgrpc_server_free(EZGRPCServer *server_handle) {
   }
 
   free(server_handle->sv.services);
-  shutdown(server_handle->sockfd, SHUT_RDWR);
+
+  if (server_handle->is_server_ipv4)
+    shutdown(server_handle->ipv4_sockfd, SHUT_RDWR);
+
+  if (server_handle->is_server_ipv6)
+    shutdown(server_handle->ipv6_sockfd, SHUT_RDWR);
+
   free(server_handle);
 }
 
@@ -1234,14 +1278,24 @@ int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd) {
   server_handle->shutdownfd = shutdownfd;
   return 0;
 }
-int ezgrpc_server_set_listen_port(EZGRPCServer *server_handle, uint16_t port) {
-  server_handle->port = port;
+
+int ezgrpc_server_set_ipv4_listen_port(EZGRPCServer *server_handle, uint16_t port) {
+  server_handle->is_server_ipv4 = 1;
+  server_handle->ipv4_port = port;
   return 0;
 }
 
-int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
+int ezgrpc_server_set_ipv6_listen_port(EZGRPCServer *server_handle, uint16_t port) {
+  server_handle->is_server_ipv6 = 1;
+  server_handle->ipv6_port = port;
+  return 0;
+}
+
+int ezgrpc_server_add_service(EZGRPCServer *server_handle, i8 *service_path,
                               ezgrpc_server_service_callback service_callback,
-                              char flags) {
+                              int (*in_deserializer)(ezvec_t *in, ezvec_t *out),
+                              int (*out_serializer)(ezvec_t *in, ezvec_t *out),
+                              i8 flags) {
   size_t nb_services = server_handle->sv.nb_services;
   ezgrpc_service_t *services = server_handle->sv.services;
 
@@ -1252,6 +1306,8 @@ int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
   services[nb_services].service_path = strdup(service_path);
   services[nb_services].service_callback = service_callback;
   services[nb_services].service_flags = flags;
+  services[nb_services].in_deserializer = in_deserializer;
+  services[nb_services].out_serializer = out_serializer;
 
   server_handle->sv.nb_services = nb_services + 1;
   server_handle->sv.services = services;
@@ -1260,72 +1316,153 @@ int ezgrpc_server_add_service(EZGRPCServer *server_handle, char *service_path,
 
 int ezgrpc_server_start(EZGRPCServer *server_handle) {
   int ret = 0;
-  int sockfd = 0;
+  int ipv4_sockfd = -1;
+  int ipv6_sockfd = -1;
+  struct sockaddr_in ipv4_saddr;
+  struct sockaddr_in6 ipv6_saddr;
 
-  struct sockaddr_in saddr;
-  memset(&saddr, 0, sizeof(saddr));
-  saddr.sin_family = AF_INET;
-  saddr.sin_addr.s_addr = inet_addr("0.0.0.0");
-  saddr.sin_port = htons(server_handle->port);
+  /* shutdown fd + ipv4 fd + ipv6 fd */
+  struct pollfd event[3];
 
-  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-    perror("socket");
-    return 1;
-  }
+  if (!(server_handle->is_server_ipv4 || server_handle->is_server_ipv6))
+    assert(0);;
 
-  setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-
-  if (bind(sockfd, (struct sockaddr *)&saddr, sizeof(saddr)) == -1) {
-    perror("bind");
-    return 1;
-  }
-
-  if (listen(sockfd, 16) == -1) {
-    perror("listen");
-    return 1;
-  }
-
-  if (makenonblock(sockfd))
-    assert(0); // TODO
-
-  server_handle->sockfd = sockfd;
-
-  ezlog("listening on port %d ...\n", server_handle->port);
-
-  struct pollfd event[2];
   event[0].fd = server_handle->shutdownfd;
   event[0].events = POLLIN;
+  event[0].revents = 0;
+  event[1].fd = -1;
+  event[2].fd = -1;
 
-  event[1].fd = server_handle->sockfd;
-  event[1].events = POLLIN | POLLRDHUP;
+  if (server_handle->is_server_ipv4) {
+    memset(&ipv4_saddr, 0, sizeof(ipv4_saddr));
+    ipv4_saddr.sin_family = AF_INET;
+    ipv4_saddr.sin_addr.s_addr = inet_addr("0.0.0.0");
+    ipv4_saddr.sin_port = htons(server_handle->ipv4_port);
+  
+    if ((ipv4_sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+      perror("socket");
+      return 1;
+    }
+  
+    setsockopt(ipv4_sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+  
+    if (bind(ipv4_sockfd, (struct sockaddr *)&ipv4_saddr, sizeof(ipv4_saddr)) == -1) {
+      perror("bind ipv4");
+      return 1;
+    }
+  
+    if (listen(ipv4_sockfd, 16) == -1) {
+      perror("listen ipv4");
+      return 1;
+    }
+  
+    if (makenonblock(ipv4_sockfd))
+      assert(0); // TODO
+  
+    server_handle->ipv4_sockfd = ipv4_sockfd;
+  
+    event[1].fd = ipv4_sockfd;
+    event[1].events = POLLIN | POLLRDHUP;
+    ezlog("listening on ipv4 0.0.0.0:%d ...\n", server_handle->ipv4_port);
+  }
+
+  if (server_handle->is_server_ipv6) {
+    memset(&ipv6_saddr, 0, sizeof(ipv6_saddr));
+    ipv6_saddr.sin6_family = AF_INET6;
+    if (inet_pton(AF_INET6, "::", ipv6_saddr.sin6_addr.s6_addr) != 1) {
+      perror("inet_pton");
+      return 1;
+    }
+    ipv6_saddr.sin6_port = htons(server_handle->ipv6_port);
+  
+    if ((ipv6_sockfd = socket(AF_INET6, SOCK_STREAM, 0)) == -1) {
+      perror("socket");
+      return 1;
+    }
+  
+    if (setsockopt(ipv6_sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int))){
+      perror("setsockopt ipv6");
+      return 1;
+    }
+    if (setsockopt(ipv6_sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &(int){1}, sizeof(int))){
+      perror("setsockopt ipv6");
+      return 1;
+    }
+      
+  
+    if (bind(ipv6_sockfd, (struct sockaddr *)&ipv6_saddr, sizeof(ipv6_saddr)) == -1) {
+      perror("bind ipv6");
+      return 1;
+    }
+  
+    if (listen(ipv6_sockfd, 16) == -1) {
+      perror("listen ipv6");
+      return 1;
+    }
+  
+    if (makenonblock(ipv6_sockfd))
+      assert(0); // TODO
+  
+    server_handle->ipv6_sockfd = ipv6_sockfd;
+  
+    event[2].fd = ipv6_sockfd;
+    event[2].events = POLLIN | POLLRDHUP;
+    ezlog("listening on ipv6 [::]:%d ...\n", server_handle->ipv6_port);
+  }
+
 
   /* start accepting connections */
   while (1) {
-    event[0].revents = 0;
     event[1].revents = 0;
-    int res = poll(event, 2, 1000 * 60 * 30);
+    event[2].revents = 0;
+    int res = poll(event, 3, 1000 * 60 * 30);
     if (res == -1) {
       printf("poll: error\n");
       assert(0);
     } else if (res == 0) {
-      ezlog("timeout %d\n", server_handle->sockfd);
+      ezlog("timeout\n");
       continue;
     }
     /* we've received a shutdown */
     if (event[0].revents & POLLIN)
       break;
 
+    /* event on ipv4 listen socket */
     if (event[1].revents & POLLIN) {
-      ezlog("incoming connection\n");
-      int confd = accept(sockfd, (struct sockaddr *)&saddr,
-                         (socklen_t *)&(int){sizeof(saddr)});
+      ezlog("incoming ipv4 connection\n");
+      int confd = accept(ipv4_sockfd, (struct sockaddr *)&ipv4_saddr,
+                         (socklen_t *)&(int){sizeof(ipv4_saddr)});
       if (confd == -1) {
         perror("accept");
         continue;
       }
 
-      ezgrpc_session_t *ezsession = server_accept(
-          confd, (struct sockaddr *)&saddr, sizeof(saddr), server_handle);
+      ezgrpc_session_t *ezsession = server_accept(AF_INET,
+          confd, (struct sockaddr *)&ipv4_saddr, sizeof(ipv4_saddr), server_handle);
+      if (ezsession == NULL) {
+        ezlog("max session reached\n");
+        shutdown(confd, SHUT_RDWR);
+        continue;
+      }
+      int res =
+          pthread_create(&ezsession->sthread, NULL, start_session, ezsession);
+      if (res) {
+        ezlog("fatal: pthread_create %d\n", res);
+        session_reaper(ezsession);
+      }
+    }
+    /* event on ipv6 listen socket */
+    if (event[2].revents & POLLIN) {
+      ezlog("incoming ipv6 connection\n");
+      int confd = accept(ipv6_sockfd, (struct sockaddr *)&ipv6_saddr,
+                         (socklen_t *)&(int){sizeof(ipv6_saddr)});
+      if (confd == -1) {
+        perror("accept");
+        continue;
+      }
+
+      ezgrpc_session_t *ezsession = server_accept(AF_INET6,
+          confd, (struct sockaddr *)&ipv6_saddr, sizeof(ipv6_saddr), server_handle);
       if (ezsession == NULL) {
         ezlog("max session reached\n");
         shutdown(confd, SHUT_RDWR);

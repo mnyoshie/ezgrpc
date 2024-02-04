@@ -50,10 +50,10 @@ int main(){
   assert(server_handle != NULL);
 
   int flags = EZGRPC_SERVICE_FLAG_SERVER_STREAMING | EZGRPC_SERVICE_FLAG_EDGET;
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1, flags);
-  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2, 0);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1, NULL, NULL, flags);
+  ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2, NULL, NULL, 0);
 
-  ezgrpc_server_set_listen_port(server_handle, 19009);
+  ezgrpc_server_set_ipv4_listen_port(server_handle, 19009);
   ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);
 
   /* when a SIGINT/SIGTERM is received. this should return */
