@@ -104,11 +104,6 @@ struct ezvec_t {
   u8 *data;
 };
 
-struct ezlvec_t {
-  size_t data_len;
-  u8 *data;
-};
-
 /* grpc length-prefixed message */
 struct ezgrpc_message_t {
   u8 is_compressed;
@@ -217,13 +212,17 @@ struct ezgrpc_services_t {
 };
 
 struct ezgrpc_session_t {
-  int sockfd;
+  int sockfd, domain;
 
   nghttp2_session *ngsession;
 
   /* an ASCII string */
   i8 client_addr[64];
-  u16 server_port;
+  u16 client_port;
+
+  i8 *server_addr;
+  u16 *server_port;
+
 
   pthread_mutex_t ngmutex;
   pthread_t sthread;
@@ -272,11 +271,15 @@ struct ezgrpc_sessions_t {
 
 typedef struct EZGRPCServer EZGRPCServer;
 struct EZGRPCServer {
-  i8 is_server_ipv4:1;
-  i8 is_server_ipv6:1;
+  i8 is_ipv4_enabled:1;
+  i8 is_ipv6_enabled:1;
 
   u16 ipv4_port;
   u16 ipv6_port;
+
+  /* ASCII strings which represent where address to bind to */
+  i8 ipv4_addr[16];
+  i8 ipv6_addr[64];
 
   /* listening socket */
   int ipv4_sockfd;
@@ -313,8 +316,14 @@ int ezgrpc_init(void *(*signal_handler)(void *), ezhandler_arg *ezarg);
 
 EZGRPCServer *ezgrpc_server_init(void);
 
-int ezgrpc_server_set_ipv4_listen_port(EZGRPCServer *server_handle, u16 port);
-int ezgrpc_server_set_ipv6_listen_port(EZGRPCServer *server_handle, u16 port);
+int ezgrpc_server_set_ipv4_bind_port(EZGRPCServer *server_handle, u16 port);
+int ezgrpc_server_set_ipv6_bind_port(EZGRPCServer *server_handle, u16 port);
+
+int ezgrpc_server_set_ipv4_bind_addr(EZGRPCServer *server_handle, const i8 *addr);
+int ezgrpc_server_set_ipv6_bind_addr(EZGRPCServer *server_handle, const i8 *addr);
+
+int ezgrpc_server_enable_ipv4(EZGRPCServer *server_handle, char n);
+int ezgrpc_server_enable_ipv6(EZGRPCServer *server_handle, char n);
 
 int ezgrpc_server_set_shutdownfd(EZGRPCServer *server_handle, int shutdownfd);
 

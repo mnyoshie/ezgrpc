@@ -53,7 +53,7 @@ int main(){
   ezgrpc_server_add_service(server_handle, "/test.yourAPI/whatever_service1", whatever_service1, NULL, NULL, flags);
   ezgrpc_server_add_service(server_handle, "/test.yourAPI/another_service2", another_service2, NULL, NULL, 0);
 
-  ezgrpc_server_set_ipv4_listen_port(server_handle, 19009);
+  ezgrpc_server_set_ipv4_bind_port(server_handle, 19009);
   ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);
 
   /* when a SIGINT/SIGTERM is received. this should return */
