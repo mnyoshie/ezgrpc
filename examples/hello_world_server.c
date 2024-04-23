@@ -53,7 +53,8 @@ int main(){
   ezgrpc_server_set_ipv6_bind_port(server_handle, 19009);
   ezgrpc_server_set_shutdownfd(server_handle, pfd[0]);
 
-  /* when a SIGINT/SIGTERM is received. this should return */
+  /* This call is blocking.
+   * when a SIGINT/SIGTERM is received, it should return */
   ezgrpc_server_start(server_handle);
 
   ezgrpc_server_free(server_handle);

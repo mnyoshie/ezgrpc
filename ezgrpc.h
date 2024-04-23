@@ -3,7 +3,9 @@
 #ifndef EZGRPC_H
 #define EZGRPC_H
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <assert.h>
 #include <byteswap.h>
@@ -70,6 +72,7 @@ enum ezgrpc_status_code_t {
   EZGRPC_GRPC_STATUS_DATA_LOSS = 15,
   EZGRPC_GRPC_STATUS_NULL = -1
 };
+
 typedef enum ezgrpc_status_code_t ezgrpc_status_code_t;
 
 typedef struct ezgrpc_service_t ezgrpc_service_t;
@@ -269,6 +272,7 @@ struct ezgrpc_sessions_t {
   ezgrpc_session_t sessions[EZGRPC_MAX_SESSIONS];
 };
 
+/* This struct is private. Please use the auxilliary functions below it */
 typedef struct EZGRPCServer EZGRPCServer;
 struct EZGRPCServer {
   i8 is_ipv4_enabled:1;
@@ -307,6 +311,10 @@ struct EZGRPCServer {
   ezgrpc_sessions_t ng;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ezgrpc builtin signal handler. You can either use this by passing it
  * to ezgrpc_init, or build one of your own.
  * */
@@ -338,5 +346,9 @@ int ezgrpc_server_add_service(EZGRPCServer *server_handle, i8 *service_path,
 int ezgrpc_server_start(EZGRPCServer *server_handle);
 
 void ezgrpc_server_free(EZGRPCServer *server_handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* EZGRPC_H */
