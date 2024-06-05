@@ -11,7 +11,7 @@
  *
  * MIT license.
  *
- * Copyright (c) 2023-2024 M. N. Yoshie
+ * Copyright (c) 2023-2024 M. N. Yoshie & Al-buharie Amjari
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
