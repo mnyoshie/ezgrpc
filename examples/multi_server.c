@@ -6,11 +6,16 @@
  * A multi server running on different ports
  */
 
+#include <stdio.h>
 #include <pthread.h>
 #include <assert.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include "ezgrpc.h"
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 volatile _Atomic int running_servers = 0;
 
@@ -48,12 +53,6 @@ int another_service2(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userda
 }
 
 int main(){
-
-
-  int pfd[2];
-  if (pipe(pfd))
-    assert(0);
-  
   /*
    * ezgrpc_init() must be executed before any other ez functions
    * are called
@@ -65,24 +64,41 @@ int main(){
    *
    *   (2) Sets up so that any pthread_create after this won't
    *   received SIGINT/SIGTERM/SIGPIPE, making sure
-   *   ezserver_signal_handler() only receives it.
+   *   ezserver_signal_handler() only receives it. (linux)
    *
    * ezserver_signal_handler does mainly 2 things:
    *
    *   (1) When a SIGINT/SIGTERM is received, writes to pfd[1].
    *   all running servers polling pfd[0] will notice this
-   *   and should return.
+   *   and should return. (linux)
    *  
-   *   (2) When a SIGPIPE is received, ignores it.
+   *   (2) When a SIGPIPE is received, ignores it. (linux)
    *
    * NOTE: do not swap pfd[1] for pfd[0] and vice versa.
    */
+  int pfd[2];
+#ifdef _WIN32
+  if (_pipe(pfd, 256, _O_BINARY))
+  {
+    assert(0);
+  } 
+  ezhandler_arg ezarg = {pfd[1]};
+  if (ezgrpc_init(ezserver_signal_handler, &ezarg)) {
+    fprintf(stderr, "fatal: couldn't init ezgrpc\n");
+    return 1;
+  }
+#else
+  if (pipe(pfd))
+  {
+    assert(0);
+  }
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};
   if (ezgrpc_init(ezserver_signal_handler, &ezarg)) {
     fprintf(stderr, "fatal: couldn't init ezgrpc\n");
     return 1;
   }
+#endif
 
   pthread_t sthread1, sthread2, sthread3;
 

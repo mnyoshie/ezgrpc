@@ -82,6 +82,10 @@
 //Reset
 #define COLOR_RESET "\e[0m"
 
+#ifdef _WIN32
+#define COLSTR(string, color) string
+#else
 #define COLSTR(string, color) color string COLOR_RESET
+#endif
 
 #endif /* ANSI_COLOR_CODES_H */

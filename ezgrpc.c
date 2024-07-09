@@ -63,7 +63,7 @@
 #  define poll WSAPoll
 #  define ssize_t int
 #  define SHUT_RDWR SD_BOTH
-#  define POLLRDHUP POLLHUP
+#  define POLLRDHUP 0
 
 static char *strndup(char *c, size_t n) {
   size_t l;
@@ -1198,7 +1198,7 @@ static int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
 
 int makenonblock(int sockfd) {
 #ifdef _WIN32
-  return ioctlsocket(sockfd, FIONBIO, &(u_long)1);
+  return ioctlsocket(sockfd, FIONBIO, &(u_long){1});
 #else
   int res = fcntl(sockfd, F_GETFL, 0);
   if (res == -1) return 1;
@@ -1456,7 +1456,7 @@ int ezgrpc_init(
   g_thread_self = pthread_self();
 
   shutdownfd = ezarg->shutdownfd;
-  return SetConsoleCtrlHandler(handler, TRUE);
+  return !SetConsoleCtrlHandler(handler, TRUE);
 }
 #else
 int ezgrpc_init(
@@ -1795,8 +1795,12 @@ int ezgrpc_server_start(EZGRPCServer *server_handle) {
     event[1].revents = 0;
     event[2].revents = 0;
     int res = poll(event, 3, 1000 * 60 * 30);
-    if (res == -1) {
+    if (res == SOCKET_ERROR) {
+#ifdef _WIN32
+      printf("WSAPoll: error %d\n", WSAGetLastError());
+#else
       printf("poll: error\n");
+#endif
       assert(0);
     } else if (res == 0) {
       ezlog("timeout\n");

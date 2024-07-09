@@ -2,6 +2,7 @@
  * and releases it into the public domain
  */
 
+#include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -39,19 +40,26 @@ int main(){
   int pfd[2];
 #ifdef _WIN32
   if (_pipe(pfd, 256, _O_BINARY))
+  {
+    assert(0);
+  } 
+  ezhandler_arg ezarg = {pfd[1]};
+  if (ezgrpc_init(ezserver_signal_handler, &ezarg)) {
+    fprintf(stderr, "fatal: couldn't init ezgrpc\n");
+    return 1;
+  }
 #else
   if (pipe(pfd))
-#endif
   {
     assert(0);
   }
-  
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};
   if (ezgrpc_init(ezserver_signal_handler, &ezarg)) {
     fprintf(stderr, "fatal: couldn't init ezgrpc\n");
     return 1;
   }
+#endif
 
   EZGRPCServer *server_handle = ezgrpc_server_init();
   assert(server_handle != NULL);
