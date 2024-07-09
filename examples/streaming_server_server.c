@@ -2,6 +2,9 @@
  * and releases it into the public domain
  */
 
+#include <assert.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include "ezgrpc.h"
 
 int whatever_service1(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userdata){

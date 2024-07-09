@@ -2,7 +2,14 @@
  * and releases it into the public domain
  */
 
+#include <assert.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include "ezgrpc.h"
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 int whatever_service1(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userdata){
   ezgrpc_message_t *msg = calloc(1, sizeof(ezgrpc_message_t));
@@ -30,8 +37,14 @@ int another_service2(ezgrpc_message_t *req, ezgrpc_message_t **res, void *userda
 int main(){
 
   int pfd[2];
+#ifdef _WIN32
+  if (_pipe(pfd, 256, _O_BINARY))
+#else
   if (pipe(pfd))
+#endif
+  {
     assert(0);
+  }
   
   sigset_t sig_mask;
   ezhandler_arg ezarg = {&sig_mask, pfd[1]};

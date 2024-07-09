@@ -6,6 +6,10 @@
  * A multi server running on different ports
  */
 
+#include <pthread.h>
+#include <assert.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include "ezgrpc.h"
 
 volatile _Atomic int running_servers = 0;
