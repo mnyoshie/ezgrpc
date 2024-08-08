@@ -1469,7 +1469,8 @@ int ezgrpc_init(
   /* set up our signal handler to shutdown the server
    */
   sigemptyset(ezarg->signal_mask);
-  sigaddset(ezarg->signal_mask, SIGINT);
+  /* Don't ignore sigint. To gracefully kill it, send SIGTERM instead*/
+  //sigaddset(ezarg->signal_mask, SIGINT);
   sigaddset(ezarg->signal_mask, SIGTERM);
   sigaddset(ezarg->signal_mask, SIGPIPE);
   res = pthread_sigmask (SIG_BLOCK, ezarg->signal_mask, NULL);
@@ -1509,6 +1510,9 @@ int ezgrpc_init(
 #ifdef _WIN32
 BOOL ezserver_signal_handler(DWORD type) {
   switch (type) {
+    /* Don't ignore sigint */
+    case CTRL_C_EVENT:
+      return FALSE;
     case CTRL_CLOSE_EVENT:
     case CTRL_SHUTDOWN_EVENT:
       {

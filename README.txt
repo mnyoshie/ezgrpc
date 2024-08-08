@@ -1,5 +1,7 @@
 # EZgRPC 
 
+This has deprecated and superceded by ezgrpc2 https://github.com/mnyoshie/ezgrpc2
+
 Still in its draft.
 
 requires: -lnghttp2 -lpthread -lz
